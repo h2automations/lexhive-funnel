@@ -21,15 +21,19 @@ The build passes (`npm run build`), typechecks clean (`tsc --noEmit`), and both
 | ✅ | Vercel production deployment linked to project `lexhive-funnel` |
 | ✅ | Meta Pixel installed — dataset `27653864700958179` |
 | ✅ | `VITE_META_PIXEL_ID` set as a Vercel production env var |
-| ⬜ | Supabase project created & `schema.sql` run (needs `SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY`) |
-| ⬜ | Meta CAPI access token + Test Events code configured |
-| ⬜ | n8n workflows imported/activated, `N8N_WEBHOOK_URL` set |
+| ✅ | **Supabase configured** — `schema.sql` applied (leads, state_rules, delivery_outbox, claim_outbox_batch, lead_counts, outbox_health, RLS all live) |
+| ✅ | Server-side env vars on Vercel: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `META_PIXEL_ID`, `META_API_VERSION`, `DRAIN_SECRET`, `OPS_KEY`, `PUBLIC_BASE_URL` |
+| ✅ | Drain ESM import fixed (`./_lib/meta-capi.js`) — was `ERR_MODULE_NOT_FOUND` |
+| ✅ | End-to-end verified: partial save → complete submit → outbox enqueue → drain claim → retryable backoff → `/ops` health summary |
+| ⬜ | `META_CAPI_ACCESS_TOKEN` — needed for server-side Meta events to deliver |
+| ⬜ | n8n workflows imported/activated + `N8N_WEBHOOK_URL` set for Airtable delivery |
 | ⬜ | Airtable base + Slack webhook configured |
-| ⬜ | `/api/lead` + `/api/drain` end-to-end verification with live data |
+| ⬜ | Meta Test Events verification (dedup + match quality) |
 
-**To finish:** set the server-side env vars above on Vercel (Project → Settings
-→ Environment Variables), run `supabase/schema.sql`, and import the two
-workflows in `n8n/`.
+**To finish:** add `META_CAPI_ACCESS_TOKEN` on Vercel for server-side Meta
+events, then import and activate the two workflows in `n8n/` and set
+`N8N_WEBHOOK_URL`. Airtable and Slack are configured in n8n per the setup
+guide.
 
 ---
 
