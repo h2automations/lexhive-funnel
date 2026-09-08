@@ -1,0 +1,102 @@
+/* Operations view. Deliberately plainer than the funnel: this is an
+   internal tool, and density beats warmth when you are scanning for the
+   one row that is broken. */
+
+.ops {
+  max-width: 68rem;
+  margin: 0 auto;
+  padding: 2.5rem 1.5rem 5rem;
+  background: var(--paper);
+  min-height: 100vh;
+  font-size: 0.9375rem;
+}
+
+.ops h1 { font-size: 1.5rem; margin: 0 0 0.25rem; }
+.ops h2 { font-size: 1.0625rem; margin: 2.5rem 0 0.75rem; }
+.ops-muted { color: var(--ink-soft); margin: 0 0 1.5rem; }
+
+.ops-keyrow { display: flex; gap: 0.75rem; max-width: 26rem; }
+
+.ops-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+  gap: 0.75rem;
+  margin-top: 1.5rem;
+}
+
+.ops-card {
+  padding: 1rem;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--paper);
+}
+
+/* Tone is carried by a left rule as well as colour, so the state is still
+   legible in greyscale or for colour-blind users. */
+.ops-card-warn { border-left: 4px solid #B07A19; }
+.ops-card-bad  { border-left: 4px solid var(--alert); }
+
+.ops-card-value { font-size: 1.75rem; line-height: 1.1; font-variant-numeric: tabular-nums; }
+.ops-card-label { color: var(--ink-soft); font-size: 0.8125rem; margin-top: 0.25rem; }
+
+.ops-table { width: 100%; border-collapse: collapse; }
+.ops-table th {
+  text-align: left;
+  font-weight: 600;
+  font-size: 0.8125rem;
+  color: var(--ink-soft);
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--line);
+}
+.ops-table td {
+  padding: 0.625rem 0.75rem;
+  border-bottom: 1px solid #E4EAE9;
+  vertical-align: middle;
+}
+
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.ops-err {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.75rem;
+  color: var(--alert);
+  max-width: 22rem;
+  overflow-wrap: anywhere;
+}
+
+.pill {
+  display: inline-block;
+  padding: 0.125rem 0.5rem;
+  border-radius: 2px;
+  font-size: 0.75rem;
+  border: 1px solid var(--line);
+}
+.pill-succeeded  { background: var(--wash);  border-color: var(--action); }
+.pill-pending    { background: #F2F4F4; }
+.pill-delivering { background: #F2F4F4; }
+.pill-failed     { background: #FBF2E2; border-color: #B07A19; }
+.pill-dead       { background: #FBEDEB; border-color: var(--alert); color: var(--alert); }
+
+.ops-btn {
+  min-height: 44px;
+  padding: 0 1rem;
+  font: inherit;
+  font-weight: 600;
+  color: #fff;
+  background: var(--action);
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.ops-btn:disabled { opacity: 0.6; cursor: default; }
+.ops-btn-sm { min-height: 34px; padding: 0 0.75rem; font-size: 0.8125rem; }
+.ops-btn:focus-visible { outline: 3px solid var(--ink); outline-offset: 2px; }
+
+.ops-error {
+  margin-top: 1rem;
+  padding: 0.75rem;
+  border-left: 4px solid var(--alert);
+  background: #FBEDEB;
+  color: var(--alert);
+}
+
+.ops-foot { margin-top: 3rem; color: var(--ink-soft); font-size: 0.8125rem; }

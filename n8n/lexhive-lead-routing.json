@@ -1,0 +1,144 @@
+{
+  "name": "LexHive Lead Routing",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "lexhive-lead-in",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "id": "webhook-in",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 0],
+      "webhookId": "lexhive-lead-in"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "is-restricted",
+              "leftValue": "={{ $json.body.disposition }}",
+              "rightValue": "restricted",
+              "operator": { "type": "string", "operation": "equals" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-restricted",
+      "name": "Restricted state?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [220, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Restricted states: contact fields are dropped HERE, at the routing layer,\n// before anything reaches the base the sales team works in. An Airtable view\n// that hides these columns is a display filter — the data would still be in\n// the base, one click from anyone with access.\n//\n// api/drain.ts already omits them; this is the second layer. The cost of the\n// duplication is this node. The cost of missing it is a compliance incident.\n\nconst ALLOWED = [\n  'lead_id',\n  'variant',\n  'disposition',\n  'state',\n  'answers',\n  'consent_version',\n  'consent_at',\n  'submitted_at',\n];\n\nreturn items.map((item) => {\n  const body = item.json.body ?? item.json;\n  const safe = {};\n  for (const key of ALLOWED) {\n    if (body[key] !== undefined) safe[key] = body[key];\n  }\n  safe.contact_withheld = true;\n  return { json: safe };\n});"
+      },
+      "id": "strip-pii",
+      "name": "Strip contact fields",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, -140]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Unwrap the webhook body so the Airtable node maps against flat fields.\nreturn items.map((item) => ({ json: item.json.body ?? item.json }));"
+      },
+      "id": "flatten",
+      "name": "Flatten payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 140]
+    },
+    {
+      "parameters": {
+        "operation": "upsert",
+        "base": "={{ $env.AIRTABLE_BASE_ID }}",
+        "table": "Restricted",
+        "columns": {
+          "mappingMode": "defineBelow",
+          "matchingColumns": ["Lead ID"],
+          "value": {
+            "Lead ID": "={{ $json.lead_id }}",
+            "Variant": "={{ $json.variant }}",
+            "State": "={{ $json.state }}",
+            "Disposition": "={{ $json.disposition }}",
+            "Consent Version": "={{ $json.consent_version }}",
+            "Submitted At": "={{ $json.submitted_at }}"
+          }
+        },
+        "options": {}
+      },
+      "id": "airtable-restricted",
+      "name": "Airtable Restricted",
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.1,
+      "position": [700, -140]
+    },
+    {
+      "parameters": {
+        "operation": "upsert",
+        "base": "={{ $env.AIRTABLE_BASE_ID }}",
+        "table": "Leads",
+        "columns": {
+          "mappingMode": "defineBelow",
+          "matchingColumns": ["Lead ID"],
+          "value": {
+            "Lead ID": "={{ $json.lead_id }}",
+            "Variant": "={{ $json.variant }}",
+            "First Name": "={{ $json.first_name }}",
+            "Last Name": "={{ $json.last_name }}",
+            "Email": "={{ $json.email }}",
+            "Phone": "={{ $json.phone }}",
+            "State": "={{ $json.state }}",
+            "ZIP": "={{ $json.zip }}",
+            "Disposition": "={{ $json.disposition }}",
+            "UTM Source": "={{ $json.utm_source }}",
+            "UTM Campaign": "={{ $json.utm_campaign }}",
+            "Has FBC": "={{ $json.has_fbc }}",
+            "Consent Version": "={{ $json.consent_version }}",
+            "Consent At": "={{ $json.consent_at }}",
+            "Submitted At": "={{ $json.submitted_at }}"
+          }
+        },
+        "options": {}
+      },
+      "id": "airtable-leads",
+      "name": "Airtable Leads",
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.1,
+      "position": [700, 140]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [[{ "node": "Restricted state?", "type": "main", "index": 0 }]]
+    },
+    "Restricted state?": {
+      "main": [
+        [{ "node": "Strip contact fields", "type": "main", "index": 0 }],
+        [{ "node": "Flatten payload", "type": "main", "index": 0 }]
+      ]
+    },
+    "Strip contact fields": {
+      "main": [[{ "node": "Airtable Restricted", "type": "main", "index": 0 }]]
+    },
+    "Flatten payload": {
+      "main": [[{ "node": "Airtable Leads", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
