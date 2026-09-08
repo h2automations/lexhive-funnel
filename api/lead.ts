@@ -64,8 +64,8 @@ function truncate(value: unknown, max: number): string | null {
 /**
  * Restriction comes from the `state_rules` table, not a constant in this file.
  * That is the whole point of the table: compliance changes the list with an
- * UPDATE, not a deploy. A lookup failure is treated as restricted — the safe
- * direction to fail in when the question is "may we sell this person's data".
+ * UPDATE, not a deploy. A lookup error, or a state with no rule at all, is
+ * treated as restricted — the safe direction to fail in.
  */
 async function isRestricted(stateCode: string): Promise<boolean> {
   if (!stateCode) return false;
@@ -79,7 +79,13 @@ async function isRestricted(stateCode: string): Promise<boolean> {
     console.error('state_rules lookup failed, failing closed', error.message);
     return true;
   }
-  return Boolean(data?.restricted);
+
+  // No rule for this code either. Every US state is seeded, so this means an
+  // unknown or malformed value — restricted is the safe answer to "may we sell
+  // this person's data" when we cannot say where they are.
+  if (!data) return true;
+
+  return Boolean(data.restricted);
 }
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {

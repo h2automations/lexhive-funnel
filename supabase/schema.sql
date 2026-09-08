@@ -69,9 +69,11 @@ insert into public.state_rules (state_code, restricted) values
   ('NY', true), ('NC', true), ('TN', true), ('VT', true)
 on conflict (state_code) do nothing;
 
--- Every other state, explicitly unrestricted. Without these rows a lookup for
--- e.g. 'TX' returns nothing, and /api/lead fails closed (treats it as
--- restricted) — correct as a safety default, useless as a funnel.
+-- Every other state, explicitly unrestricted. These rows are required, not
+-- decorative: /api/lead treats "no rule for this state" as restricted, so
+-- without them a Texas lead would be blocked from the sales base. Failing
+-- closed is the right default for an unknown value and a broken funnel for a
+-- known one, which is why every state gets an explicit rule.
 insert into public.state_rules (state_code, restricted) values
   ('AL', false), ('AK', false), ('AZ', false), ('CA', false), ('CO', false),
   ('DE', false), ('DC', false), ('FL', false), ('GA', false), ('HI', false),
