@@ -165,7 +165,18 @@ export function reconstructFbc():
   if (!fbclid) return null;
 
   const firstSeenAt = readFirstSeenAt();
-  return { fbclid, fbc: `fb.1.${firstSeenAt}.${fbclid}`, firstSeenAt };
+  return { fbclid, fbc: `fb.${subdomainIndex()}.${firstSeenAt}.${fbclid}`, firstSeenAt };
+}
+
+/**
+ * The second segment of `_fbc` is the subdomain index of the host the cookie
+ * is written on — "com" is 0, "example.com" is 1, "lexhive.vercel.app" is 2.
+ * Hardcoding 1 produces a value that disagrees with the cookie Meta writes on
+ * any host with a different depth, which is exactly the sort of near-miss that
+ * costs match quality without ever raising an error.
+ */
+function subdomainIndex(): number {
+  return Math.max(0, window.location.hostname.split('.').length - 1);
 }
 
 function readCookie(name: string): string | null {
