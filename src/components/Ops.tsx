@@ -24,11 +24,22 @@ interface OutboxRow {
   updated_at: string;
 }
 
+interface DeliveryMetric {
+  destination: string;
+  succeeded: number;
+  failed: number;
+  dead: number;
+  p50_ms: number | null;
+  p95_ms: number | null;
+  max_queue_latency_ms: number | null;
+}
+
 interface OpsData {
   health: { destination: string; status: string; rows: number }[];
   problems: OutboxRow[];
   recent: OutboxRow[];
   funnel: Record<string, number>;
+  metrics: DeliveryMetric[];
 }
 
 export default function Ops() {
@@ -150,6 +161,40 @@ export default function Ops() {
         </tbody>
       </table>
 
+      <h2>Delivery timing, last 24 hours</h2>
+      {!data.metrics || data.metrics.length === 0 ? (
+        <p className="ops-muted">No deliveries recorded yet.</p>
+      ) : (
+        <table className="ops-table">
+          <thead>
+            <tr>
+              <th>Destination</th>
+              <th>Succeeded</th>
+              <th>Retried</th>
+              <th>Dead</th>
+              <th>p50</th>
+              <th>p95</th>
+              <th>Worst queue wait</th>
+            </tr>
+          </thead>
+          <tbody>
+            {data.metrics.map((m) => (
+              <tr key={m.destination}>
+                <td>{m.destination}</td>
+                <td>{m.succeeded}</td>
+                <td>{m.failed}</td>
+                <td>{m.dead}</td>
+                <td>{ms(m.p50_ms)}</td>
+                {/* p95, not an average: an average is dominated by the fast
+                    majority and hides the tail you actually care about. */}
+                <td>{ms(m.p95_ms)}</td>
+                <td>{ms(m.max_queue_latency_ms)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+
       <h2>Failures</h2>
       {data.problems.length === 0 ? (
         <p className="ops-muted">Nothing failing. Every delivery has landed.</p>
@@ -222,6 +267,14 @@ export default function Ops() {
       </p>
     </main>
   );
+}
+
+/** Milliseconds in the unit a human reads at a glance. */
+function ms(value: number | null | undefined): string {
+  if (value === null || value === undefined) return '—';
+  if (value < 1000) return `${value} ms`;
+  if (value < 60_000) return `${(value / 1000).toFixed(1)} s`;
+  return `${Math.round(value / 60_000)} min`;
 }
 
 function Stat({ label, value, tone }: { label: string; value: number; tone?: 'warn' | 'bad' }) {

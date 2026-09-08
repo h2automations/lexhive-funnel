@@ -17,6 +17,9 @@ import { timingSafeEqual } from 'crypto';
 import { createClient } from '@supabase/supabase-js';
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { sendMetaEvent } from './_lib/meta-capi.js';
+import { createLogger, type Logger } from './_lib/log.js';
+import { reportError } from './_lib/sentry.js';
+import { createEventRecorder, classifyError, type EventRecorder } from './_lib/events.js';
 
 const supabase = createClient(
   process.env.SUPABASE_URL!,
@@ -29,11 +32,18 @@ const N8N_WEBHOOK_URL = process.env.N8N_WEBHOOK_URL ?? '';
 const BATCH_SIZE = 10;
 const MAX_BACKOFF_MS = 1_800_000; // 32m ceiling
 
+const FETCH_TIMEOUT_MS = 10_000;
+
 interface OutboxRow {
   id: number;
   lead_id: string;
   destination: string;
   payload: Record<string, unknown>;
+  /** Already incremented by claim_outbox_batch — never add to it here. */
+  attempts: number;
+  max_attempts: number;
+  /** Enqueue time, used to measure end-to-end delivery latency. */
+  created_at: string;
 }
 
 interface DeliveryResult {
@@ -146,12 +156,18 @@ async function deliverN8n(row: OutboxRow): Promise<DeliveryResult> {
           has_fbc: Boolean(lead.fbc),
         };
 
+  // Without a timeout a hung webhook holds the drain open until Vercel kills
+  // the whole invocation, taking the other nine rows in the batch with it.
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+
   let res: Response;
   try {
     res = await fetch(N8N_WEBHOOK_URL, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(body),
+      signal: controller.signal,
     });
   } catch (err) {
     return {
@@ -159,6 +175,8 @@ async function deliverN8n(row: OutboxRow): Promise<DeliveryResult> {
       retryable: true,
       message: err instanceof Error ? err.message : 'network error',
     };
+  } finally {
+    clearTimeout(timer);
   }
 
   if (res.ok) return { ok: true, retryable: false };
@@ -169,40 +187,79 @@ async function deliverN8n(row: OutboxRow): Promise<DeliveryResult> {
   };
 }
 
-async function notifySlack(message: string) {
+async function notifySlack(message: string, log: Logger) {
   const url = process.env.SLACK_WEBHOOK_URL;
-  if (!url) return;
+  if (!url) {
+    log.warn('slack.not_configured');
+    return;
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
   try {
     await fetch(url, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ text: message }),
+      signal: controller.signal,
     });
-  } catch {
-    /* an alert failing is not worth failing the drain over */
+  } catch (err) {
+    // An alert failing is not worth failing the drain over — but it IS worth
+    // knowing about, because a silent alerting channel is worse than none.
+    log.warn('slack.notify_failed', { reason: err instanceof Error ? err.message : 'unknown' });
+  } finally {
+    clearTimeout(timer);
   }
 }
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
+  const log = createLogger({ headers: req.headers, context: { route: 'drain' } });
+  const events: EventRecorder = createEventRecorder(supabase, log);
+  res.setHeader('x-request-id', log.requestId);
+
   if (req.method !== 'POST') return res.status(405).json({ error: 'method_not_allowed' });
-  if (!authorised(req)) return res.status(401).json({ error: 'unauthorized' });
+  if (!authorised(req)) {
+    // Repeated 401s here mean either a rotated secret nobody updated in n8n,
+    // or someone probing. Both are worth seeing as a rate.
+    log.warn('drain.unauthorized');
+    return res.status(401).json({ error: 'unauthorized' });
+  }
 
   let claimed: OutboxRow[];
   try {
     claimed = await claimBatch();
   } catch (err) {
-    return res.status(500).json({
-      error: 'claim_failed',
-      detail: err instanceof Error ? err.message : 'unknown',
-    });
+    // The drain being unable to claim means nothing is being delivered at all.
+    log.error('drain.claim_failed', err);
+    await reportError(err, { tags: { area: 'delivery', route: 'drain' }, requestId: log.requestId });
+    return res.status(500).json({ error: 'claim_failed', requestId: log.requestId });
   }
 
-  if (claimed.length === 0) return res.status(200).json({ processed: 0 });
+  if (claimed.length === 0) {
+    // Logged even when idle: this line IS the drain's heartbeat. Its absence
+    // for more than a few minutes means n8n has stopped calling us, which is
+    // otherwise a completely silent failure — no errors, no alerts, and no
+    // leads reaching Airtable.
+    log.info('drain.completed', { processed: 0, duration_ms: log.elapsed() });
+    return res.status(200).json({ processed: 0, requestId: log.requestId });
+  }
 
   const summary: Record<string, number> = {};
   let deadLettered = 0;
+  let failed = 0;
 
   for (const row of claimed) {
+    // The request id that created this outbox row, so the whole life of one
+    // lead — submission, three failed attempts, eventual success — shares a
+    // single correlation id in the drain.
+    const rowLog = log.child({
+      outbox_id: row.id,
+      lead_id: row.lead_id,
+      destination: row.destination,
+      attempt: row.attempts,
+      origin_request_id: (row.payload?.request_id as string) ?? null,
+    });
+
+    const startedAt = Date.now();
     let result: DeliveryResult;
 
     try {
@@ -224,37 +281,79 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
 
     const now = new Date().toISOString();
+    const durationMs = Date.now() - startedAt;
+    // Time from enqueue to this attempt — the number that answers "how long
+    // after someone submits does the lead actually reach the sales team".
+    const queueLatencyMs = Date.now() - new Date(row.created_at).getTime();
 
     if (result.ok) {
       await supabase
         .from('delivery_outbox')
         .update({ status: 'succeeded', updated_at: now, last_error: null })
         .eq('id', row.id);
+
       summary[row.destination] = (summary[row.destination] ?? 0) + 1;
+      rowLog.info('delivery.succeeded', {
+        duration_ms: durationMs,
+        queue_latency_ms: queueLatencyMs,
+      });
+      events.add('delivery.succeeded', {
+        lead_id: row.lead_id,
+        outbox_id: row.id,
+        destination: row.destination,
+        attempt: row.attempts,
+        duration_ms: durationMs,
+        outcome: 'succeeded',
+        detail: { queue_latency_ms: queueLatencyMs },
+      });
       continue;
     }
 
-    // attempts was already incremented at claim time.
-    const { data: rec } = await supabase
-      .from('delivery_outbox')
-      .select('attempts, max_attempts')
-      .eq('id', row.id)
-      .maybeSingle();
-
-    const attempts = rec?.attempts ?? 1;
-    const maxAttempts = rec?.max_attempts ?? 6;
+    // attempts was incremented at claim time and came back with the row, so
+    // there is no second read here.
+    const attempts = row.attempts ?? 1;
+    const maxAttempts = row.max_attempts ?? 6;
     const exhausted = attempts >= maxAttempts;
+    const errorCode = classifyError(result.message);
 
     if (!result.retryable || exhausted) {
       await supabase
         .from('delivery_outbox')
         .update({ status: 'dead', last_error: result.message ?? null, updated_at: now })
         .eq('id', row.id);
+
       deadLettered += 1;
+      rowLog.error('delivery.dead', undefined, {
+        error_code: errorCode,
+        reason: result.message,
+        exhausted,
+        duration_ms: durationMs,
+        queue_latency_ms: queueLatencyMs,
+      });
+      events.add('delivery.dead', {
+        lead_id: row.lead_id,
+        outbox_id: row.id,
+        destination: row.destination,
+        attempt: attempts,
+        duration_ms: durationMs,
+        outcome: 'dead',
+        error_code: errorCode,
+        detail: { exhausted, queue_latency_ms: queueLatencyMs },
+      });
+
+      // A dead letter is a lead that will never arrive unless a human acts, so
+      // it goes to Sentry as well as Slack — Slack scrolls, Sentry groups and
+      // counts and can page.
+      await reportError(new Error(`delivery dead: ${result.message ?? 'unknown'}`), {
+        tags: { area: 'delivery', destination: row.destination, error_code: errorCode },
+        extra: { lead_id: row.lead_id, outbox_id: row.id, attempts },
+        requestId: log.requestId,
+      });
       await notifySlack(
         `LexHive: lead ${row.lead_id.slice(0, 8)} dead-lettered (${row.destination})` +
           `${exhausted ? ` after ${attempts} attempts` : ''}: ${result.message ?? 'unknown'}` +
-          ` — replay at ${(process.env.PUBLIC_BASE_URL || '').replace(/\/+$/, '')}/ops`
+          ` — replay at ${(process.env.PUBLIC_BASE_URL || '').replace(/\/+$/, '')}/ops`,
+        rowLog
       );
       continue;
     }
@@ -272,7 +371,40 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         updated_at: now,
       })
       .eq('id', row.id);
+
+    failed += 1;
+    // A retry is expected behaviour, not an incident — warn, don't error, and
+    // let the rate be the thing anyone alerts on.
+    rowLog.warn('delivery.failed', {
+      error_code: errorCode,
+      reason: result.message,
+      duration_ms: durationMs,
+      next_attempt_at: nextAttemptAt.toISOString(),
+      attempts_remaining: maxAttempts - attempts,
+    });
+    events.add('delivery.failed', {
+      lead_id: row.lead_id,
+      outbox_id: row.id,
+      destination: row.destination,
+      attempt: attempts,
+      duration_ms: durationMs,
+      outcome: 'retrying',
+      error_code: errorCode,
+      detail: { next_attempt_at: nextAttemptAt.toISOString() },
+    });
   }
 
-  return res.status(200).json({ processed: claimed.length, summary, deadLettered });
+  log.info('drain.completed', {
+    processed: claimed.length,
+    succeeded: Object.values(summary).reduce((total, n) => total + n, 0),
+    failed,
+    dead_lettered: deadLettered,
+    duration_ms: log.elapsed(),
+  });
+
+  await events.flush();
+
+  return res
+    .status(200)
+    .json({ processed: claimed.length, summary, deadLettered, requestId: log.requestId });
 }

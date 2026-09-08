@@ -13,6 +13,8 @@
 import { timingSafeEqual } from 'crypto';
 import { createClient } from '@supabase/supabase-js';
 import type { VercelRequest, VercelResponse } from '@vercel/node';
+import { createLogger } from './_lib/log.js';
+import { createEventRecorder } from './_lib/events.js';
 
 const supabase = createClient(
   process.env.SUPABASE_URL!,
@@ -35,7 +37,16 @@ function authorised(req: VercelRequest): boolean {
 }
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
-  if (!authorised(req)) return res.status(401).json({ error: 'unauthorized' });
+  const log = createLogger({ headers: req.headers, context: { route: 'ops' } });
+  const events = createEventRecorder(supabase, log);
+  res.setHeader('x-request-id', log.requestId);
+
+  if (!authorised(req)) {
+    // The ops key is the only thing between the public internet and a delivery
+    // control surface. Failed attempts are worth counting.
+    log.warn('ops.unauthorized', { method: req.method });
+    return res.status(401).json({ error: 'unauthorized' });
+  }
 
   // ---- Replay --------------------------------------------------------
   if (req.method === 'POST') {
@@ -59,7 +70,17 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       })
       .eq('id', id);
 
-    if (error) return res.status(500).json({ error: error.message });
+    if (error) {
+      log.error('ops.replay_failed', error, { outbox_id: id });
+      return res.status(500).json({ error: 'replay_failed', requestId: log.requestId });
+    }
+
+    // Replay is a human overriding the system's own judgement. That is exactly
+    // the kind of action you want a record of afterwards.
+    log.info('delivery.replayed', { outbox_id: id });
+    events.add('delivery.replayed', { outbox_id: id, outcome: 'requeued' });
+    await events.flush();
+
     return res.status(200).json({ ok: true, outboxId: id });
   }
 
@@ -83,9 +104,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       .limit(20),
   ]);
 
-  // Funnel counts are aggregated in Postgres rather than by pulling 1000 rows
-  // into the function and calling .filter() on them.
-  const { data: counts } = await supabase.rpc('lead_counts');
+  // Funnel counts and delivery timings are aggregated in Postgres rather than
+  // by pulling rows into the function and calling .filter() on them.
+  const [{ data: counts }, { data: metrics }] = await Promise.all([
+    supabase.rpc('lead_counts'),
+    supabase.rpc('delivery_metrics', { window_hours: 24 }),
+  ]);
 
   const funnel = {
     partial: 0,
@@ -96,5 +120,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     ...(counts?.[0] ?? {}),
   };
 
-  return res.status(200).json({ health, problems, recent, funnel });
+  log.info('ops.viewed', { duration_ms: log.elapsed(), problem_count: problems?.length ?? 0 });
+
+  return res.status(200).json({
+    health,
+    problems,
+    recent,
+    funnel,
+    metrics: metrics ?? [],
+    requestId: log.requestId,
+  });
 }

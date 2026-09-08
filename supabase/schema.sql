@@ -120,12 +120,21 @@ create unique index if not exists outbox_lead_destination_uniq
 -- mid-flight burns an attempt rather than looping forever. Rows left in
 -- 'delivering' self-release after a 5-minute lease.
 -- ----------------------------------------------------------------------
+-- Returns attempts, max_attempts and created_at alongside the claim so the
+-- worker needs no follow-up SELECT per row to decide retry-or-die, and can
+-- measure enqueue-to-delivery latency. Postgres will not let CREATE OR REPLACE
+-- change a function's return type, hence the drop.
+drop function if exists public.claim_outbox_batch(int);
+
 create or replace function public.claim_outbox_batch(batch_size int default 10)
 returns table (
   id bigint,
   lead_id uuid,
   destination text,
-  payload jsonb
+  payload jsonb,
+  attempts int,
+  max_attempts int,
+  created_at timestamptz
 ) language plpgsql as $$
 declare
   v_lease interval := interval '5 minutes';
@@ -154,7 +163,8 @@ begin
            updated_at = now()
       from claimed c
      where o.id = c.id
-     returning o.id, o.lead_id, o.destination, o.payload;
+     returning o.id, o.lead_id, o.destination, o.payload,
+               o.attempts, o.max_attempts, o.created_at;
 end; $$;
 
 -- ----------------------------------------------------------------------
@@ -177,6 +187,81 @@ returns table (
     count(*) filter (where disposition = 'disqualified')  as disqualified
   from public.leads;
 $$;
+
+-- ----------------------------------------------------------------------
+-- app_events — domain events, for questions the business asks about itself
+--
+-- Not general-purpose logging: debug volume goes to stdout and out through a
+-- log drain. This table holds the handful of events worth joining against
+-- leads and delivery_outbox — how long delivery takes at p95, which
+-- destination fails and with what, what /ops replayed and whether it worked.
+--
+-- It holds NO personal data, by the same rule the logs follow, so it can be
+-- pointed at a BI tool or handed to a client without a review first.
+-- ----------------------------------------------------------------------
+create table if not exists public.app_events (
+  id           bigserial primary key,
+  occurred_at  timestamptz not null default now(),
+  event        text not null,          -- lead.created | delivery.succeeded | …
+  request_id   text,                   -- ties back to the log lines
+  -- set null rather than cascade: erasing a lead for a deletion request must
+  -- not silently rewrite delivery history. The row survives without an id,
+  -- and carries nothing identifying.
+  lead_id      uuid references public.leads (id) on delete set null,
+  outbox_id    bigint,
+  destination  text,
+  disposition  text,
+  state_code   text,
+  attempt      int,
+  duration_ms  int,
+  outcome      text,
+  error_code   text,                   -- low-cardinality: http_429, timeout, …
+  detail       jsonb not null default '{}'::jsonb
+);
+
+create index if not exists app_events_time_idx  on public.app_events (occurred_at desc);
+create index if not exists app_events_event_idx on public.app_events (event, occurred_at desc);
+create index if not exists app_events_lead_idx  on public.app_events (lead_id);
+
+-- ----------------------------------------------------------------------
+-- delivery_metrics — the numbers /ops shows, computed in the database
+--
+-- percentile_cont over a window rather than an average: an average delivery
+-- time is dominated by the fast majority and hides exactly the tail anyone
+-- would want to know about.
+-- ----------------------------------------------------------------------
+create or replace function public.delivery_metrics(window_hours int default 24)
+returns table (
+  destination text,
+  succeeded bigint,
+  failed bigint,
+  dead bigint,
+  p50_ms int,
+  p95_ms int,
+  max_queue_latency_ms int
+) language sql stable as $$
+  select
+    e.destination,
+    count(*) filter (where e.event = 'delivery.succeeded')          as succeeded,
+    count(*) filter (where e.event = 'delivery.failed')             as failed,
+    count(*) filter (where e.event = 'delivery.dead')               as dead,
+    percentile_cont(0.5) within group (order by e.duration_ms)::int as p50_ms,
+    percentile_cont(0.95) within group (order by e.duration_ms)::int as p95_ms,
+    max((e.detail ->> 'queue_latency_ms')::int)                     as max_queue_latency_ms
+  from public.app_events e
+  where e.destination is not null
+    and e.occurred_at > now() - make_interval(hours => window_hours)
+  group by e.destination;
+$$;
+
+-- Retention. Logs and events are a data holding like any other; keeping them
+-- forever is a liability, not thoroughness. 90 days covers a quarterly review
+-- and any realistic incident investigation.
+--
+-- Enable pg_cron in the Supabase dashboard, then:
+--   select cron.schedule('purge-app-events', '0 3 * * *', $purge$
+--     delete from public.app_events where occurred_at < now() - interval '90 days';
+--   $purge$);
 
 -- ----------------------------------------------------------------------
 -- outbox_health — view used by the ops surface
@@ -206,10 +291,12 @@ alter view public.outbox_health set (security_invoker = on);
 alter table public.leads           enable row level security;
 alter table public.delivery_outbox enable row level security;
 alter table public.state_rules     enable row level security;
+alter table public.app_events      enable row level security;
 
 drop policy if exists "service only" on public.leads;
 drop policy if exists "service only" on public.delivery_outbox;
 drop policy if exists "service only" on public.state_rules;
+drop policy if exists "service only" on public.app_events;
 
 create policy "service only" on public.leads
   for all using (false) with check (false);
@@ -217,8 +304,11 @@ create policy "service only" on public.delivery_outbox
   for all using (false) with check (false);
 create policy "service only" on public.state_rules
   for all using (false) with check (false);
+create policy "service only" on public.app_events
+  for all using (false) with check (false);
 
 -- lead_counts() is stable/sql and reads public.leads; only the service role
 -- ever calls it, and RLS above blocks anon regardless.
 revoke all on function public.lead_counts() from anon;
 revoke all on function public.claim_outbox_batch(int) from anon;
+revoke all on function public.delivery_metrics(int) from anon;

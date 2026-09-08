@@ -85,8 +85,11 @@ does not collect a city, and filling the field with the state to have something
 there costs match quality rather than adding it.
 
 **`fbc` reconstruction.** When `_fbc` is absent but `fbclid` is in the URL, the
-value is rebuilt as `fb.1.<first_seen_ms>.<fbclid>`, using the session's first
-touch rather than the current time. This is the largest match-quality gain
+value is rebuilt as `fb.<subdomain_index>.<first_seen_ms>.<fbclid>`, using the
+session's first touch rather than the current time, and deriving the index from
+the hostname rather than hardcoding it — Meta writes `fb.2.…` on
+`lexhive.vercel.app`, and a constant `1` there is a near-miss that costs match
+quality without ever raising an error. This is the largest match-quality gain
 available in the funnel and is routinely missed, because the cookie only exists
 after the Pixel script loads — visitors who bounce, block scripts, or submit
 quickly never get one.
@@ -213,6 +216,40 @@ and alert when it drops below threshold.
 **Test event code.** `META_TEST_EVENT_CODE` routes events to the Test Events tab
 during evaluation. It must be **unset** in production or events never reach live
 reporting. Deduplication and match quality behave identically either way.
+
+---
+
+## Observability
+
+Three layers, because they answer different questions: structured JSON logs to a
+drain (`api/_lib/log.ts`), Sentry for exceptions (`api/_lib/sentry.ts`), and a
+`app_events` table in Postgres for the domain events `/ops` reports on
+(`api/_lib/events.ts`).
+
+No personal data reaches any of them. That is enforced by a redactor that strips
+forbidden keys at any depth from everything logged, not by a convention every
+call site has to remember — `api/_lib/log.test.ts` proves it, including the
+realistic accident of logging a whole lead row.
+
+`request_id` flows from the browser response header, through the log lines, onto
+the outbox row, and into the drain's logs, so a delivery that succeeds three
+retries later is still traceable to the submission that created it.
+
+**[PRODUCTION.md](./PRODUCTION.md)** covers what else this needs before it
+carries real ad spend, in the order I would do it — rate limiting and bot
+protection on the lead endpoint, real auth on `/ops`, a dead-man's switch on the
+drain, migrations, staging, CI, and a retention policy — plus what to alert on
+and at what threshold.
+
+---
+
+## Running the checks
+
+```bash
+npm run typecheck   # tsc --noEmit
+npm test            # node:test, via esbuild
+npm run verify      # all of the above plus the build
+```
 
 ---
 

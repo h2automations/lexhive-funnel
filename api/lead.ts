@@ -14,6 +14,9 @@
 import { randomUUID, createHash } from 'crypto';
 import { createClient } from '@supabase/supabase-js';
 import type { VercelRequest, VercelResponse } from '@vercel/node';
+import { createLogger, type Logger } from './_lib/log.js';
+import { reportError } from './_lib/sentry.js';
+import { createEventRecorder } from './_lib/events.js';
 
 const supabase = createClient(
   process.env.SUPABASE_URL!,
@@ -67,7 +70,7 @@ function truncate(value: unknown, max: number): string | null {
  * UPDATE, not a deploy. A lookup error, or a state with no rule at all, is
  * treated as restricted — the safe direction to fail in.
  */
-async function isRestricted(stateCode: string): Promise<boolean> {
+async function isRestricted(stateCode: string, log: Logger): Promise<boolean> {
   if (!stateCode) return false;
   const { data, error } = await supabase
     .from('state_rules')
@@ -76,7 +79,14 @@ async function isRestricted(stateCode: string): Promise<boolean> {
     .maybeSingle();
 
   if (error) {
-    console.error('state_rules lookup failed, failing closed', error.message);
+    // Worth an alert: this means compliance routing is running blind, and it
+    // will look like an unexplained spike in restricted leads.
+    log.error('state_rules.lookup_failed', error, { state_code: stateCode, failing_closed: true });
+    void reportError(error, {
+      tags: { area: 'compliance' },
+      extra: { state_code: stateCode },
+      requestId: log.requestId,
+    });
     return true;
   }
 
@@ -89,6 +99,13 @@ async function isRestricted(stateCode: string): Promise<boolean> {
 }
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
+  const log = createLogger({ headers: req.headers, context: { route: 'lead' } });
+  const events = createEventRecorder(supabase, log);
+
+  // Handed back so a browser error report, a support ticket, or a Vercel
+  // access log can be joined to the log lines for this exact invocation.
+  res.setHeader('x-request-id', log.requestId);
+
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'method_not_allowed' });
   }
@@ -104,14 +121,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const answers = (body.answers ?? {}) as Record<string, { q?: string; a?: string; label?: string }>;
 
   if (typeof answers !== 'object' || Array.isArray(answers)) {
+    log.warn('lead.rejected', { reason: 'invalid_answers' });
     return res.status(400).json({ error: 'invalid_answers' });
   }
   if (JSON.stringify(answers).length > MAX_ANSWERS_BYTES) {
+    log.warn('lead.rejected', { reason: 'answers_too_large' });
     return res.status(413).json({ error: 'answers_too_large' });
   }
 
   const stateCode = (answers.state?.a ?? '').toUpperCase().slice(0, 2);
-  const restricted = await isRestricted(stateCode);
+  const restricted = await isRestricted(stateCode, log);
 
   // Any "No" to a knockout question disqualifies — age included, which the
   // previous version asked and then ignored.
@@ -129,6 +148,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   // asks for them. Requiring an email or phone regardless made restricted
   // submissions impossible to finish.
   if (isComplete && !restricted && !email && !phone) {
+    // A spike here means the contact step is broken, not that users are being
+    // careless — worth watching as a rate, not reading as individual lines.
+    log.warn('lead.rejected', { reason: 'contact_required', variant, disposition });
+    events.add('lead.rejected', {
+      disposition,
+      state_code: stateCode || null,
+      error_code: 'contact_required',
+      duration_ms: log.elapsed(),
+    });
+    await events.flush();
     return res.status(400).json({ error: 'contact_required' });
   }
 
@@ -181,6 +210,18 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   let leadId = existingId;
   let eventId: string | null = null;
+  let created = false;
+
+  /** The durability boundary failing is the one thing here worth paging on. */
+  async function failWrite(error: { message: string }) {
+    log.error('lead.write_failed', error, { variant, disposition, existing: Boolean(existingId) });
+    await reportError(error, {
+      tags: { area: 'durability', route: 'lead' },
+      extra: { variant, disposition },
+      requestId: log.requestId,
+    });
+    return res.status(500).json({ error: 'db_write_failed', requestId: log.requestId });
+  }
 
   if (existingId) {
     const { data, error } = await supabase
@@ -190,9 +231,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       .select('id, event_id')
       .maybeSingle();
 
-    if (error) {
-      return res.status(500).json({ error: 'db_write_failed', detail: error.message });
-    }
+    if (error) return failWrite(error);
+
     if (data) {
       leadId = data.id;
       eventId = data.event_id;
@@ -204,14 +244,21 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (!leadId) {
     leadId = randomUUID();
     eventId = randomUUID();
+    created = true;
     const { error } = await supabase
       .from('leads')
       .insert({ ...row, id: leadId, event_id: eventId, created_at: now });
 
-    if (error) {
-      return res.status(500).json({ error: 'db_write_failed', detail: error.message });
-    }
+    if (error) return failWrite(error);
   }
+
+  events.add(created ? 'lead.created' : 'lead.updated', {
+    lead_id: leadId,
+    disposition,
+    state_code: stateCode || null,
+    duration_ms: log.elapsed(),
+    detail: { variant, step_count: Object.keys(answers).length },
+  });
 
   // ---- Enqueue outbox deliveries (only on complete) ------------------
   if (isComplete) {
@@ -227,7 +274,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         {
           lead_id: leadId,
           destination: 'meta_capi',
-          payload: { event_id: eventId, event_name: 'Lead' },
+          // The originating request id rides along on the outbox row, so a
+          // delivery that succeeds forty minutes and three retries later can
+          // still be traced back to the submission that created it.
+          payload: { event_id: eventId, event_name: 'Lead', request_id: log.requestId },
           status: 'pending',
           attempts: 0,
           max_attempts: 6,
@@ -238,7 +288,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         {
           lead_id: leadId,
           destination: 'n8n_airtable',
-          payload: { lead_id: leadId },
+          payload: { lead_id: leadId, request_id: log.requestId },
           status: 'pending',
           attempts: 0,
           max_attempts: 6,
@@ -250,11 +300,55 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
       if (outboxError) {
         // The lead is already safe. Delivery is reconciled by /ops, not by
-        // failing a request the user is waiting on.
-        console.error('outbox enqueue failed', outboxError.message);
+        // failing a request the user is waiting on. It is still an alert: a
+        // lead nobody is delivering is a lead nobody is calling.
+        log.error('outbox.enqueue_failed', outboxError, { lead_id: leadId });
+        await reportError(outboxError, {
+          tags: { area: 'delivery', route: 'lead' },
+          extra: { lead_id: leadId },
+          requestId: log.requestId,
+        });
+      } else {
+        events.add('outbox.enqueued', {
+          lead_id: leadId,
+          disposition,
+          detail: { destinations: ['meta_capi', 'n8n_airtable'] },
+        });
       }
     }
+
+    events.add('lead.completed', {
+      lead_id: leadId,
+      disposition,
+      state_code: stateCode || null,
+      duration_ms: log.elapsed(),
+      detail: {
+        variant,
+        // Match-quality inputs, as booleans. Whether we hold an fbc is the
+        // single best predictor of Meta match rate, and it is a fact about the
+        // session rather than about the person.
+        has_fbc: Boolean(row.fbc),
+        has_fbp: Boolean(row.fbp),
+        has_zip: Boolean(row.zip),
+        has_email: Boolean(email),
+        has_phone: Boolean(phone),
+        utm_source: attr.utm_source ?? null,
+      },
+    });
   }
+
+  log.info(isComplete ? 'lead.completed' : 'lead.saved', {
+    lead_id: leadId,
+    disposition,
+    state_code: stateCode || null,
+    variant,
+    created,
+    duration_ms: log.elapsed(),
+  });
+
+  // Flushed before responding: a function frozen on return would otherwise
+  // drop the insert.
+  await events.flush();
 
   return res.status(200).json({ leadId, eventId, variant, disposition });
 }

@@ -6,7 +6,10 @@
   "scripts": {
     "dev": "vercel dev",
     "build": "tsc -b && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "esbuild api/_lib/*.test.ts --bundle --format=esm --platform=node --outdir=.test-build --out-extension:.js=.mjs --log-level=error && node --test .test-build/*.test.mjs",
+    "typecheck": "tsc --noEmit",
+    "verify": "npm run typecheck && npm test && npm run build"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.0",
