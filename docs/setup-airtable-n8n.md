@@ -57,19 +57,14 @@ this base only. Copy the base ID from the URL (`airtable.com/appXXXXXXXX/…`).
 
 ## 2. n8n
 
-**Import.** Workflows → Import from File, once for each file in `n8n/` — there
-are three: lead routing, the outbox drain, and error alerts.
+**Import.** Workflows → Import from File for the two workflows in `n8n/`: lead
+routing and the outbox drain. The lead-routing webhook responds only after its
+Airtable node finishes, so a failure returns non-2xx and the outbox retries it.
 
-**Error alerts.** `lexhive-error-alerts.json` is an Error Trigger workflow that
-posts to Slack when any other workflow fails. Set `SLACK_WEBHOOK_URL` in n8n's
-environment, then open each of the other two workflows → Settings → **Error
-Workflow** → select it. Without this, an Airtable node failing *after* the
-webhook has already responded 200 leaves the outbox recording a success that
-never happened — the one gap the retry machinery cannot see.
-
-**Credentials.** On both Airtable nodes, add the personal access token. Set the
-`AIRTABLE_BASE_ID` environment variable in n8n to the base ID, or replace the
-`{{ $env.AIRTABLE_BASE_ID }}` expression with the literal value.
+**Credentials.** On both Airtable nodes, add the personal access token. The
+authenticated webhook payload carries `airtable_base_id`, and both Airtable
+nodes read it using `{{ $json.airtable_base_id }}`. Keep the token itself only
+in n8n credentials; it must never be included in the webhook body.
 
 **Lead routing workflow.** Activate it, then copy the production webhook URL
 from the Webhook node — that value is `N8N_WEBHOOK_URL` in the next step. Check
@@ -96,8 +91,9 @@ environment changes only take effect on the next build:
 | Variable | Value |
 |---|---|
 | `N8N_WEBHOOK_URL` | The production webhook URL from above |
+| `N8N_INTERNAL_SECRET` | A long random value; use the same value in n8n's `LexHive Internal Secret` header-auth credential (`x-internal-secret`) |
+| `AIRTABLE_BASE_ID` | The `app...` identifier copied from the LexHive Leads base URL; included in the authenticated n8n payload |
 | `META_CAPI_ACCESS_TOKEN` | Events Manager → Settings → Conversions API → Generate access token |
-| `SLACK_WEBHOOK_URL` | Optional; dead-letter alerts |
 | `SENTRY_DSN` | Optional; error tracking |
 
 Also re-run `supabase/schema.sql` if you haven't since the observability commit
@@ -129,6 +125,8 @@ Step 6 is the compliance demonstration. Worth recording.
 | Error | Cause |
 |---|---|
 | `n8n_webhook_url_not_configured` | `N8N_WEBHOOK_URL` unset on Vercel, or no redeploy since |
+| `n8n_internal_secret_not_configured` | `N8N_INTERNAL_SECRET` is missing on Vercel |
+| `airtable_base_id_not_configured` | `AIRTABLE_BASE_ID` is missing on Vercel |
 | `http_401` on `meta_capi` | Bad or missing `META_CAPI_ACCESS_TOKEN` |
 | `http_422` on `n8n_airtable` | An Airtable field name doesn't match the table above |
 | Nothing moves at all | The drain workflow isn't active in n8n |

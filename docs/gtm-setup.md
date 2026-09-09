@@ -10,6 +10,38 @@ exists in someone's account is configuration nobody can review.
 
 ---
 
+## There is only one page
+
+Worth settling before you build a single trigger: **this is a single-page app.**
+`App.tsx` reads `window.location.pathname` once at mount and nothing ever pushes
+history. The URL is identical on question one and on the thank-you screen.
+
+So a Page View trigger fires **once per session**, no History Change event ever
+fires, and a trigger like `Page Path equals /qualification-v1/step-2` matches
+nothing, because that page does not exist. Funnel progress is carried entirely
+by the custom events below.
+
+| Path | Renders | Track? |
+|---|---|---|
+| `/qualification-v1` | The funnel — canonical entry | Yes |
+| `/qualification-v2`, `-v3`, … | Same funnel, different variant | Yes |
+| `/` | The funnel; variant defaults to `qualification-v1` | Yes |
+| **`/ops`** | Internal delivery surface | **No — block** |
+
+Anything that isn't `/ops` renders the funnel: Vercel rewrites every non-`/api/`
+path to `index.html`, and `App.tsx` treats the path as the variant name. So the
+only page condition you need is the `/ops` exclusion.
+
+If you want per-variant reporting, match `Page Path` with the RegEx
+`^/qualification-v\d+$` — the variant is the path, which is what makes an A/B
+test a URL change rather than a deploy.
+
+**Do not push virtual pageviews for the steps.** It would inflate session
+pageview counts and make bounce rate meaningless, to describe something
+`funnel_step` already describes exactly.
+
+---
+
 ## The dataLayer contract
 
 Three events, all pushed from `src/lib/datalayer.ts`. Nothing else is published.

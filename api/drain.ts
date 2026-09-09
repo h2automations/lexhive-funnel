@@ -29,6 +29,8 @@ const supabase = createClient(
 
 const DRAIN_SECRET = process.env.DRAIN_SECRET ?? '';
 const N8N_WEBHOOK_URL = process.env.N8N_WEBHOOK_URL ?? '';
+const N8N_INTERNAL_SECRET = process.env.N8N_INTERNAL_SECRET ?? '';
+const AIRTABLE_BASE_ID = process.env.AIRTABLE_BASE_ID ?? '';
 const BATCH_SIZE = 10;
 const MAX_BACKOFF_MS = 1_800_000; // 32m ceiling
 
@@ -71,6 +73,8 @@ function authorised(req: VercelRequest): boolean {
 }
 
 async function claimBatch(limit = BATCH_SIZE): Promise<OutboxRow[]> {
+  const { error: reconcileError } = await supabase.rpc('reconcile_missing_outbox');
+  if (reconcileError) throw reconcileError;
   const { data, error } = await supabase.rpc('claim_outbox_batch', { batch_size: limit });
   if (error) throw error;
   return (data ?? []) as OutboxRow[];
@@ -95,7 +99,7 @@ async function deliverMeta(row: OutboxRow): Promise<DeliveryResult> {
     // trap: it made the server quietly depend on a browser variable, and it
     // would have kept working right up until someone tidied that variable away.
     pixelId: process.env.META_PIXEL_ID || '',
-    apiVersion: process.env.META_API_VERSION || 'v21.0',
+    apiVersion: process.env.META_API_VERSION || 'v26.0',
     eventName: (row.payload.event_name as string) || 'Lead',
     eventId: (row.payload.event_id as string) || lead.event_id,
     userData: {
@@ -129,11 +133,18 @@ async function deliverN8n(row: OutboxRow): Promise<DeliveryResult> {
   if (!N8N_WEBHOOK_URL) {
     return { ok: false, retryable: true, message: 'n8n_webhook_url_not_configured' };
   }
+  if (!N8N_INTERNAL_SECRET) {
+    return { ok: false, retryable: true, message: 'n8n_internal_secret_not_configured' };
+  }
+  if (!AIRTABLE_BASE_ID) {
+    return { ok: false, retryable: true, message: 'airtable_base_id_not_configured' };
+  }
 
   const lead = await loadLead(row.lead_id);
   if (!lead) return { ok: false, retryable: false, message: 'lead_not_found' };
 
   const common = {
+    airtable_base_id: AIRTABLE_BASE_ID,
     lead_id: lead.id,
     variant: lead.variant,
     disposition: lead.disposition,
@@ -157,6 +168,7 @@ async function deliverN8n(row: OutboxRow): Promise<DeliveryResult> {
           last_name: lead.last_name,
           email: lead.email,
           phone: lead.phone,
+          gender: lead.gender,
           zip: lead.zip,
           utm_source: lead.utm_source,
           utm_campaign: lead.utm_campaign,
@@ -172,7 +184,10 @@ async function deliverN8n(row: OutboxRow): Promise<DeliveryResult> {
   try {
     res = await fetch(N8N_WEBHOOK_URL, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: {
+        'content-type': 'application/json',
+        'x-internal-secret': N8N_INTERNAL_SECRET,
+      },
       body: JSON.stringify(body),
       signal: controller.signal,
     });
@@ -192,30 +207,6 @@ async function deliverN8n(row: OutboxRow): Promise<DeliveryResult> {
     retryable: res.status >= 500 || res.status === 429,
     message: `HTTP ${res.status}`,
   };
-}
-
-async function notifySlack(message: string, log: Logger) {
-  const url = process.env.SLACK_WEBHOOK_URL;
-  if (!url) {
-    log.warn('slack.not_configured');
-    return;
-  }
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-  try {
-    await fetch(url, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ text: message }),
-      signal: controller.signal,
-    });
-  } catch (err) {
-    // An alert failing is not worth failing the drain over — but it IS worth
-    // knowing about, because a silent alerting channel is worse than none.
-    log.warn('slack.notify_failed', { reason: err instanceof Error ? err.message : 'unknown' });
-  } finally {
-    clearTimeout(timer);
-  }
 }
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
@@ -349,19 +340,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       });
 
       // A dead letter is a lead that will never arrive unless a human acts, so
-      // it goes to Sentry as well as Slack — Slack scrolls, Sentry groups and
-      // counts and can page.
+      // it is persisted in app_events, shown in /ops, and reported to Sentry.
       await reportError(new Error(`delivery dead: ${result.message ?? 'unknown'}`), {
         tags: { area: 'delivery', destination: row.destination, error_code: errorCode },
         extra: { lead_id: row.lead_id, outbox_id: row.id, attempts },
         requestId: log.requestId,
       });
-      await notifySlack(
-        `LexHive: lead ${row.lead_id.slice(0, 8)} dead-lettered (${row.destination})` +
-          `${exhausted ? ` after ${attempts} attempts` : ''}: ${result.message ?? 'unknown'}` +
-          ` — replay at ${(process.env.PUBLIC_BASE_URL || '').replace(/\/+$/, '')}/ops`,
-        rowLog
-      );
       continue;
     }
 

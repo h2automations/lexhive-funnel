@@ -7,7 +7,7 @@ screen is there to prove it.
 
 **Before recording:** have four tabs open — the funnel, `/ops`, Meta Test
 Events, and the repo on `api/lead.ts`. Submit one lead beforehand so `/ops` has
-data. Close Slack.
+data.
 
 ---
 
@@ -34,7 +34,7 @@ Switch to `/ops`: the lead appears, both destinations delivered.
 
 Screen: Meta Test Events showing browser and server `Lead` deduplicated.
 
-> "The server mints the `event_id`, stores it on the lead row and returns it.
+> "The server validates and stores the submission UUID as `event_id`, then returns the database value.
 > The browser fires the Pixel event with that exact value, and the drain sends
 > the same one to the Conversions API.
 >

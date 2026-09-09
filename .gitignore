@@ -1,9 +1,12 @@
 node_modules
 .env.local
 .env.*.local
+.env.e2e
 .DS_Store
 dist
 .vercel
 *.log
 *.tsbuildinfo
 .test-build
+playwright-report
+test-results

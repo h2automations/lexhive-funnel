@@ -3,7 +3,7 @@
  *
  * The single durability boundary of the whole funnel. Writes (or updates) the
  * lead row in Postgres, enqueues delivery_outbox rows on completion, and
- * returns the server-minted event_id. The request is finished the moment
+ * returns the database-authoritative event_id. The request is finished the moment
  * Postgres commits — Meta and Airtable are deliveries, not dependencies.
  *
  * Partial saves UPDATE the row created by the first save rather than inserting
@@ -11,7 +11,7 @@
  * makes every count on /ops a multiple of the truth.
  */
 
-import { randomUUID, createHash } from 'crypto';
+import { createHash } from 'crypto';
 import { createClient } from '@supabase/supabase-js';
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { createLogger, type Logger } from './_lib/log.js';
@@ -28,6 +28,19 @@ const supabase = createClient(
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const VARIANT_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const MAX_ANSWERS_BYTES = 8_000;
+const REQUIRED_ANSWERS = ['age', 'gender', 'state', 'work', 'duration', 'doctor', 'months'] as const;
+const YES_NO = new Set(['Yes', 'No']);
+const GENDERS = new Set(['m', 'f', 'undisclosed']);
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+// Auto-drain: self-heals so a completed submission is not hostage to the
+// external n8n schedule. The schedule remains the retry/backlog backstop.
+// Every completion kicks a sweep — no client-side throttle: overlapping
+// sweeps are safe because claim_outbox_batch uses FOR UPDATE SKIP LOCKED and
+// burns attempts at claim time, so concurrent drains cannot double-deliver.
+const DRAIN_SECRET = process.env.DRAIN_SECRET ?? '';
+const BASE_URL = (process.env.PUBLIC_BASE_URL ?? '').replace(/\/+$/, '');
+const DRAIN_TIMEOUT_MS = 4_000;
 
 interface Attribution {
   fbclid?: string | null;
@@ -99,6 +112,27 @@ async function isRestricted(stateCode: string, log: Logger): Promise<boolean> {
   return Boolean(data.restricted);
 }
 
+function triggerDrainSweep(log: Logger): Promise<void> {
+  if (!DRAIN_SECRET || !BASE_URL) return Promise.resolve();
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), DRAIN_TIMEOUT_MS);
+
+  return fetch(`${BASE_URL}/api/drain`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-drain-secret': DRAIN_SECRET,
+    },
+    signal: controller.signal,
+  })
+    .then(() => undefined)
+    .catch((err) => {
+      log.warn('drain.auto_trigger_failed', { error: err?.message ?? String(err) });
+    })
+    .finally(() => clearTimeout(timer));
+}
+
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   const log = createLogger({ headers: req.headers, context: { route: 'lead' } });
   const events = createEventRecorder(supabase, log);
@@ -113,30 +147,58 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   const body = (req.body ?? {}) as Record<string, any>;
 
+  async function reject(reason: string, status = 400) {
+    log.warn('lead.rejected', { reason });
+    events.add('lead.rejected', {
+      error_code: reason,
+      duration_ms: log.elapsed(),
+    });
+    await events.flush();
+    return res.status(status).json({ error: reason });
+  }
+
   // ---- Validation ---------------------------------------------------
   const variant = typeof body.variant === 'string' && VARIANT_RE.test(body.variant)
     ? body.variant
     : 'qualification-v1';
 
   const isComplete = body.status === 'complete';
+  if (body.status !== 'partial' && body.status !== 'complete') {
+    return reject('invalid_status');
+  }
+  const submissionId =
+    typeof body.submissionId === 'string' && UUID_RE.test(body.submissionId)
+      ? body.submissionId
+      : null;
+  if (!submissionId) return reject('invalid_submission_id');
   const answers = (body.answers ?? {}) as Answers;
 
   if (typeof answers !== 'object' || Array.isArray(answers)) {
-    log.warn('lead.rejected', { reason: 'invalid_answers' });
-    return res.status(400).json({ error: 'invalid_answers' });
+    return reject('invalid_answers');
   }
   if (JSON.stringify(answers).length > MAX_ANSWERS_BYTES) {
-    log.warn('lead.rejected', { reason: 'answers_too_large' });
-    return res.status(413).json({ error: 'answers_too_large' });
+    return reject('answers_too_large', 413);
   }
 
   // Resolved rather than truncated: `"New York".slice(0, 2)` is `"NE"`, and
   // Nebraska is unrestricted. See _lib/qualification.ts.
   const stateCode = stateCodeFrom(answers);
+  if (isComplete) {
+    const completeAnswers = REQUIRED_ANSWERS.every(
+      (key) => typeof answers[key]?.a === 'string' && Boolean(answers[key]!.a!.trim())
+    );
+    const validBinary = ['age', 'work', 'duration', 'doctor', 'months'].every((key) =>
+      YES_NO.has(answers[key]?.a ?? '')
+    );
+    if (!completeAnswers || !validBinary || !GENDERS.has(answers.gender?.a ?? '') || !stateCode || stateCode === 'ZZ') {
+      return reject('invalid_complete_answers');
+    }
+  }
   const restricted = await isRestricted(stateCode ?? '', log);
   const disposition = classify({ answers, restricted });
 
-  const contact = (body.contact ?? {}) as Record<string, unknown>;
+  const suppliedContact = (body.contact ?? {}) as Record<string, unknown>;
+  const contact = restricted ? {} : suppliedContact;
   const email = truncate(contact.email, 320);
   const phone = truncate(contact.phone, 32);
 
@@ -156,13 +218,26 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     await events.flush();
     return res.status(400).json({ error: 'contact_required' });
   }
+  if (isComplete && !restricted) {
+    const phoneDigits = (phone ?? '').replace(/\D/g, '');
+    const validPhone = phoneDigits.length === 10 || (phoneDigits.length === 11 && phoneDigits.startsWith('1'));
+    const validZip = /^\d{5}$/.test(truncate(contact.zip, 10) ?? '');
+    const validNames = Boolean(truncate(contact.firstName, 100) && truncate(contact.lastName, 100));
+    if (!email || !EMAIL_RE.test(email) || !validPhone || !validZip || !validNames) {
+      return reject('invalid_contact');
+    }
+  }
 
   const attr: Attribution = body.attribution ?? {};
   const now = new Date().toISOString();
   const consent = (body.consent ?? {}) as Record<string, unknown>;
+  if (isComplete && consent.given !== true) {
+    return reject('consent_required');
+  }
 
   const row: Record<string, unknown> = {
     variant,
+    submission_id: submissionId,
     status: isComplete ? 'complete' : 'partial',
     disposition,
     answers,
@@ -191,14 +266,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     external_id: truncate(body.externalId, 100),
     client_ip: clientIp(req),
     user_agent: truncate(req.headers['user-agent'], 500),
-    dedupe_key: isComplete ? dedupeHash(phone || email || '') : null,
+    dedupe_key: isComplete && (phone || email) ? dedupeHash(phone || email || '') : null,
     updated_at: now,
   };
 
   // Null out keys we have no value for, so a later partial save can't wipe
   // something an earlier one captured (attribution arrives once, at landing).
   for (const key of Object.keys(row)) {
-    if (row[key] === null && key !== 'submitted_at') delete row[key];
+    const restrictedContactKey = restricted && ['email', 'phone', 'first_name', 'last_name', 'zip'].includes(key);
+    if (row[key] === null && key !== 'submitted_at' && !restrictedContactKey) delete row[key];
   }
 
   // ---- Insert or update ---------------------------------------------
@@ -220,11 +296,25 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return res.status(500).json({ error: 'db_write_failed', requestId: log.requestId });
   }
 
-  if (existingId) {
+  if (!leadId) {
+    const { data, error } = await supabase
+      .from('leads')
+      .select('id, event_id')
+      .eq('submission_id', submissionId)
+      .maybeSingle();
+    if (error) return failWrite(error);
+    if (data) {
+      leadId = data.id;
+      eventId = data.event_id;
+    }
+  }
+
+  if (leadId) {
     const { data, error } = await supabase
       .from('leads')
       .update(row)
-      .eq('id', existingId)
+      .eq('id', leadId)
+      .eq('submission_id', submissionId)
       .select('id, event_id')
       .maybeSingle();
 
@@ -239,8 +329,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   if (!leadId) {
-    leadId = randomUUID();
-    eventId = randomUUID();
+    // Deterministic for this browser submission, so two racing first partial
+    // saves converge on the same row and event id.
+    leadId = submissionId;
+    eventId = submissionId;
     created = true;
     const { error } = await supabase
       .from('leads')
@@ -259,59 +351,61 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   // ---- Enqueue outbox deliveries (only on complete) ------------------
   if (isComplete) {
-    // Guard against a double submit re-enqueueing the same deliveries.
-    const { data: existingRows } = await supabase
-      .from('delivery_outbox')
-      .select('id')
-      .eq('lead_id', leadId)
-      .limit(1);
+    const deliveries = [
+      ...(disposition === 'qualified'
+        ? [
+            {
+              lead_id: leadId,
+              destination: 'meta_capi',
+              // The originating request id rides along on the outbox row, so a
+              // delivery that succeeds forty minutes and three retries later can
+              // still be traced back to the submission that created it.
+              payload: { event_id: eventId, event_name: 'Lead', request_id: log.requestId },
+              status: 'pending',
+              attempts: 0,
+              max_attempts: 6,
+              next_attempt_at: now,
+              created_at: now,
+              updated_at: now,
+            },
+          ]
+        : []),
+      {
+        lead_id: leadId,
+        destination: 'n8n_airtable',
+        payload: { lead_id: leadId, request_id: log.requestId },
+        status: 'pending',
+        attempts: 0,
+        max_attempts: 6,
+        next_attempt_at: now,
+        created_at: now,
+        updated_at: now,
+      },
+    ];
+    const { error: outboxError } = await supabase.from('delivery_outbox').upsert(deliveries, {
+      onConflict: 'lead_id,destination',
+      ignoreDuplicates: true,
+    });
 
-    if (!existingRows || existingRows.length === 0) {
-      const { error: outboxError } = await supabase.from('delivery_outbox').insert([
-        {
-          lead_id: leadId,
-          destination: 'meta_capi',
-          // The originating request id rides along on the outbox row, so a
-          // delivery that succeeds forty minutes and three retries later can
-          // still be traced back to the submission that created it.
-          payload: { event_id: eventId, event_name: 'Lead', request_id: log.requestId },
-          status: 'pending',
-          attempts: 0,
-          max_attempts: 6,
-          next_attempt_at: now,
-          created_at: now,
-          updated_at: now,
-        },
-        {
-          lead_id: leadId,
-          destination: 'n8n_airtable',
-          payload: { lead_id: leadId, request_id: log.requestId },
-          status: 'pending',
-          attempts: 0,
-          max_attempts: 6,
-          next_attempt_at: now,
-          created_at: now,
-          updated_at: now,
-        },
-      ]);
-
-      if (outboxError) {
-        // The lead is already safe. Delivery is reconciled by /ops, not by
-        // failing a request the user is waiting on. It is still an alert: a
-        // lead nobody is delivering is a lead nobody is calling.
-        log.error('outbox.enqueue_failed', outboxError, { lead_id: leadId });
-        await reportError(outboxError, {
-          tags: { area: 'delivery', route: 'lead' },
-          extra: { lead_id: leadId },
-          requestId: log.requestId,
-        });
-      } else {
-        events.add('outbox.enqueued', {
+    if (outboxError) {
+      // The lead is already safe. The drain's reconciliation pass recreates
+      // any missing delivery rows before it claims work.
+      log.error('outbox.enqueue_failed', outboxError, { lead_id: leadId });
+      await reportError(outboxError, {
+        tags: { area: 'delivery', route: 'lead' },
+        extra: { lead_id: leadId },
+        requestId: log.requestId,
+      });
+    } else {
+      events.add('outbox.enqueued', {
           lead_id: leadId,
           disposition,
-          detail: { destinations: ['meta_capi', 'n8n_airtable'] },
-        });
-      }
+          detail: {
+            destinations: disposition === 'qualified'
+              ? ['meta_capi', 'n8n_airtable']
+              : ['n8n_airtable'],
+          },
+      });
     }
 
     events.add('lead.completed', {
@@ -347,5 +441,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   // drop the insert.
   await events.flush();
 
-  return res.status(200).json({ leadId, eventId, variant, disposition });
+  // Self-heal: a bounded drain sweep BEFORE the response. Work left running
+  // after a sent response is not guaranteed to execute on Vercel (the
+  // invocation can be frozen), so the client absorbs the sweep cost instead of
+  // the delivery being lost. Under backlog the sweep may fall short — the n8n
+  // schedule remains the retry/backlog backstop.
+  if (isComplete) {
+    await triggerDrainSweep(log);
+  }
+
+  res.status(200).json({ leadId, eventId, variant, disposition });
 }

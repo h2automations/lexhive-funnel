@@ -23,6 +23,16 @@ statement.
 The compliance path is table-driven and fails closed. The consent artifact
 stores the wording, not just a version number.
 
+The delivery path is now proven against the live site (2026-09-09): Playwright
+submissions were drained and every row delivered — `meta_capi` 5/5, `n8n_airtable`
+9/9, zero dead-lettered, both destinations healthy on `/ops`. The one gap the
+probe exposed was trigger, not delivery: a fresh submission sat `pending` for
+90+s because nothing was calling the drain (the n8n Outbox Drain schedule is
+not running in the user's instance). `/api/lead` now self-triggers a bounded
+drain sweep on every completed submission so a lead is not hostage to the
+external scheduler; the schedule remains the backstop for retries and backlog.
+Activating that schedule in n8n is still required (see `README.md`).
+
 What follows is what stands between that and taking money for leads.
 
 ---
@@ -78,7 +88,7 @@ the most per minute.
 
 ### 4. Backlog alerting, not just dead-letter alerting
 
-Slack is notified when a delivery dies. Nothing is said when deliveries are
+Sentry is notified when a delivery dies. Nothing is said when deliveries are
 merely *slow* — which is the far more common failure, and the one that quietly
 turns a 60-second lead into a 40-minute lead. Speed-to-lead is the single
 biggest driver of contact rate in this industry; a 40-minute delay is a
@@ -308,9 +318,9 @@ Thresholds matter more than dashboards. Nobody watches a dashboard at 2am.
 |---|---|---|
 | No `drain.completed` in 5 minutes | **Page** | Delivery has silently stopped |
 | `state_rules.lookup_failed` | **Page** | Compliance routing is running blind |
-| Oldest `pending` outbox row > 10 min | Slack | Delivery is degraded, not dead |
-| Any `delivery.dead` | Slack | A lead needs a human to replay it |
-| `lead.rejected` (`contact_required`) > 20% of completions | Slack | The contact step is broken |
+| Oldest `pending` outbox row > 10 min | Sentry | Delivery is degraded, not dead |
+| Any `delivery.dead` | Sentry | A lead needs a human to replay it |
+| `lead.rejected` (`contact_required`) > 20% of completions | Sentry | The contact step is broken |
 | p95 delivery latency > 30s | Ticket | Speed-to-lead is eroding |
 | Meta EMQ drops below threshold | Weekly review | Match quality decays gradually |
 

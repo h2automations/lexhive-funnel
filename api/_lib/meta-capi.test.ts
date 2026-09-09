@@ -37,7 +37,7 @@ function stubFetch(response: { ok: boolean; status: number; json: unknown }) {
 const baseArgs = {
   accessToken: 'test-token',
   pixelId: '123456',
-  apiVersion: 'v21.0',
+  apiVersion: 'v26.0',
   eventName: 'Lead',
   eventId: 'event-1',
 };
@@ -63,7 +63,7 @@ test('identifiers are normalized before hashing', async () => {
     const userData = calls[0]!.body.data[0].user_data;
 
     assert.equal(userData.em, sha256('claimant.name@example.com'), 'email: trimmed and lowercased');
-    assert.equal(userData.ph, sha256('4155550134'), 'phone: digits only, country code dropped');
+    assert.equal(userData.ph, sha256('14155550134'), 'phone: US country code retained');
     assert.equal(userData.fn, sha256('jane'), 'name: trimmed and lowercased');
     assert.equal(userData.st, sha256('ny'), 'state: two-letter code, lowercased');
     assert.equal(userData.zp, sha256('10001'), 'zip: first five digits');

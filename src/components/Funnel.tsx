@@ -103,14 +103,23 @@ export default function Funnel({ variant }: { variant: string }) {
   const [disposition, setDisposition] = useState<string>('qualified');
   const [status, setStatus] = useState<'idle' | 'submitting' | 'done' | 'error'>('idle');
   const [error, setError] = useState<string | null>(null);
+  const [validatingState, setValidatingState] = useState(false);
 
   // Held in a ref as well as state: `answer()` fires the next partial save
   // before React has re-rendered, and the save must carry the id it was
   // given last time or the server has no row to update.
   const leadIdRef = useRef<string | null>(null);
+  const saveQueueRef = useRef<Promise<unknown>>(Promise.resolve());
   const mainRef = useRef<HTMLDivElement>(null);
 
   const externalId = useMemo(() => getExternalId(), []);
+  const submissionId = useMemo(
+    () =>
+      typeof crypto !== 'undefined' && 'randomUUID' in crypto
+        ? crypto.randomUUID()
+        : `submission-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    []
+  );
   const restricted = disposition === 'restricted';
 
   useEffect(() => {
@@ -132,30 +141,41 @@ export default function Funnel({ variant }: { variant: string }) {
    * Save progress. Returns the server's disposition so the contact step knows
    * whether it is allowed to ask for contact details at all.
    */
-  async function persistPartial(nextAnswers: Record<string, Answer>): Promise<void> {
-    try {
-      const res = await fetch('/api/lead', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          leadId: leadIdRef.current,
-          variant,
-          status: 'partial',
-          answers: nextAnswers,
-          attribution: getAttribution(),
-          externalId,
-        }),
-      });
-      if (!res.ok) return;
-      const data = await res.json();
-      if (data.leadId) leadIdRef.current = data.leadId;
-      if (data.disposition) setDisposition(data.disposition);
-    } catch {
-      // A partial save must never block the funnel.
-    }
+  async function persistPartial(nextAnswers: Record<string, Answer>): Promise<string | null> {
+    const save = async (): Promise<string | null> => {
+      try {
+        const res = await fetch('/api/lead', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            leadId: leadIdRef.current,
+            submissionId,
+            variant,
+            status: 'partial',
+            answers: nextAnswers,
+            attribution: getAttribution(),
+            externalId,
+          }),
+        });
+        if (!res.ok) return null;
+        const data = await res.json();
+        if (data.leadId) leadIdRef.current = data.leadId;
+        if (data.disposition) setDisposition(data.disposition);
+        return typeof data.disposition === 'string' ? data.disposition : null;
+      } catch {
+        // A partial save must never block the funnel.
+        return null;
+      }
+    };
+
+    // Preserve answer order. Besides preventing stale writes, this ensures the
+    // final completion cannot overtake a slow partial save.
+    const pending = saveQueueRef.current.then(save, save);
+    saveQueueRef.current = pending.then(() => undefined, () => undefined);
+    return pending;
   }
 
-  function answer(o: Option) {
+  async function answer(o: Option) {
     const question = currentQuestion;
     const next = {
       ...answers,
@@ -166,7 +186,17 @@ export default function Funnel({ variant }: { variant: string }) {
 
     // Every step is saved, including the last one — that is what gives a
     // truthful drop-off number for the final question.
-    void persistPartial(next);
+    if (question.id === 'state') {
+      // Do not reveal or collect contact fields until the server-side
+      // compliance lookup has answered. If validation is unavailable, fail
+      // closed and show the restricted completion path.
+      setValidatingState(true);
+      const serverDisposition = await persistPartial(next);
+      if (!serverDisposition) setDisposition('restricted');
+      setValidatingState(false);
+    } else {
+      void persistPartial(next);
+    }
 
     // Ad and analytics platforms get the step ORDINAL only — never the answer,
     // and never the question's semantic id. Both halves matter: the answer is
@@ -183,12 +213,14 @@ export default function Funnel({ variant }: { variant: string }) {
     setStatus('submitting');
     setError(null);
     try {
+      await saveQueueRef.current;
       const attr = refreshCookies(getAttribution());
       const res = await fetch('/api/lead', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
           leadId: leadIdRef.current,
+          submissionId,
           variant,
           status: 'complete',
           answers,
@@ -227,7 +259,7 @@ export default function Funnel({ variant }: { variant: string }) {
       leadIdRef.current = data.leadId;
       if (data.disposition) setDisposition(data.disposition);
 
-      // The conversion. `event_id` is the id the server minted and will send
+      // The conversion. `event_id` is the id the server persisted and will send
       // to the Conversions API; the Meta Pixel tag in GTM maps it to Event ID
       // so the two collapse into one conversion. See docs/gtm-setup.md.
       leadSubmitted({
@@ -408,7 +440,13 @@ export default function Funnel({ variant }: { variant: string }) {
           <legend className="sr-only">{currentQuestion.q}</legend>
           <div className={`options${currentQuestion.o.length > 2 ? ' options-list' : ''}`} role="group">
             {currentQuestion.o.map((o) => (
-              <button key={o.value} type="button" className="option" onClick={() => answer(o)}>
+              <button
+                key={o.value}
+                type="button"
+                className="option"
+                disabled={validatingState}
+                onClick={() => void answer(o)}
+              >
                 {o.label}
               </button>
             ))}

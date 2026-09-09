@@ -50,6 +50,9 @@ alter table public.leads add column if not exists consent_given boolean;
 -- Meta advanced-matching key `ge`. Stored as given ('m' | 'f' | 'undisclosed');
 -- the CAPI client normalizes and drops anything that isn't m or f.
 alter table public.leads add column if not exists gender text;
+alter table public.leads add column if not exists submission_id uuid;
+create unique index if not exists leads_submission_id_uniq
+  on public.leads (submission_id) where submission_id is not null;
 
 create index if not exists leads_status_idx  on public.leads (status);
 create index if not exists leads_disp_idx    on public.leads (disposition);
@@ -115,6 +118,34 @@ create index if not exists outbox_lead_idx on public.delivery_outbox (lead_id);
 -- the same event twice.
 create unique index if not exists outbox_lead_destination_uniq
   on public.delivery_outbox (lead_id, destination);
+
+-- Repair the only failure window left by the HTTP API: a completed lead whose
+-- outbox insert failed after the lead itself committed. The drain calls this
+-- before every claim, making stranded deliveries self-healing.
+create or replace function public.reconcile_missing_outbox()
+returns int language plpgsql as $$
+declare
+  inserted_count int;
+begin
+  insert into public.delivery_outbox (lead_id, destination, payload)
+  select l.id, 'n8n_airtable', jsonb_build_object('lead_id', l.id)
+    from public.leads l
+   where l.status = 'complete'
+  on conflict (lead_id, destination) do nothing;
+
+  insert into public.delivery_outbox (lead_id, destination, payload)
+  select l.id, 'meta_capi', jsonb_build_object(
+    'event_id', l.event_id,
+    'event_name', 'Lead'
+  )
+    from public.leads l
+   where l.status = 'complete'
+     and l.disposition = 'qualified'
+  on conflict (lead_id, destination) do nothing;
+
+  get diagnostics inserted_count = row_count;
+  return inserted_count;
+end; $$;
 
 -- ----------------------------------------------------------------------
 -- claim_outbox_batch — atomic claim that never double-delivers

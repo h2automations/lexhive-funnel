@@ -14,8 +14,8 @@ paid by the person filling in the form.
 ## Assumptions
 
 - US Social Security disability, since the reference funnel is SSDI. Phone
-  normalization assumes a US country code and drops anything that isn't ten
-  digits rather than guessing.
+  normalization adds or retains the US country code and drops anything that is
+  not a valid US number rather than guessing.
 - The restricted-state list is the twelve states commonly restricted for legal
   lead gen. It lives in a `state_rules` table and is read on every submission,
   so compliance changes it with an `UPDATE` and no deploy.
@@ -23,8 +23,8 @@ paid by the person filling in the form.
 
 ## Trade-offs
 
-**Deduplication is server-authoritative.** `/api/lead` mints the `event_id`,
-stores it and returns it; the browser Pixel fires with that exact value and the
+**Deduplication is server-authoritative.** `/api/lead` validates and persists
+the stable submission UUID as `event_id`, then returns the database value; the browser Pixel fires with that exact value and the
 drain sends the same one to the CAPI. Minting client-side and hoping the server
 echoes it breaks silently on any retry — this way a mismatch is structurally
 impossible.

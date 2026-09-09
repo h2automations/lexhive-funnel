@@ -3,9 +3,10 @@
   "nodes": [
     {
       "parameters": {
+        "authentication": "headerAuth",
         "httpMethod": "POST",
         "path": "lexhive-lead-in",
-        "responseMode": "onReceived",
+        "responseMode": "lastNode",
         "options": {}
       },
       "id": "webhook-in",
@@ -13,7 +14,12 @@
       "type": "n8n-nodes-base.webhook",
       "typeVersion": 2,
       "position": [0, 0],
-      "webhookId": "lexhive-lead-in"
+      "webhookId": "lexhive-lead-in",
+      "credentials": {
+        "httpHeaderAuth": {
+          "name": "LexHive Internal Secret"
+        }
+      }
     },
     {
       "parameters": {
@@ -43,7 +49,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Restricted states: contact fields are dropped HERE, at the routing layer,\n// before anything reaches the base the sales team works in. An Airtable view\n// that hides these columns is a display filter — the data would still be in\n// the base, one click from anyone with access.\n//\n// api/drain.ts already omits them; this is the second layer. The cost of the\n// duplication is this node. The cost of missing it is a compliance incident.\n\nconst ALLOWED = [\n  'lead_id',\n  'variant',\n  'disposition',\n  'state',\n  'answers',\n  'consent_version',\n  'consent_at',\n  'submitted_at',\n];\n\nreturn items.map((item) => {\n  const body = item.json.body ?? item.json;\n  const safe = {};\n  for (const key of ALLOWED) {\n    if (body[key] !== undefined) safe[key] = body[key];\n  }\n  safe.contact_withheld = true;\n  return { json: safe };\n});"
+        "jsCode": "// Restricted states: contact fields are dropped HERE, at the routing layer,\n// before anything reaches the base the sales team works in. An Airtable view\n// that hides these columns is a display filter — the data would still be in\n// the base, one click from anyone with access.\n//\n// api/drain.ts already omits them; this is the second layer. The cost of the\n// duplication is this node. The cost of missing it is a compliance incident.\n\nconst ALLOWED = [\n  'airtable_base_id',\n  'lead_id',\n  'variant',\n  'disposition',\n  'state',\n  'answers',\n  'consent_version',\n  'consent_at',\n  'submitted_at',\n];\n\nreturn items.map((item) => {\n  const body = item.json.body ?? item.json;\n  const safe = {};\n  for (const key of ALLOWED) {\n    if (body[key] !== undefined) safe[key] = body[key];\n  }\n  safe.contact_withheld = true;\n  return { json: safe };\n});"
       },
       "id": "strip-pii",
       "name": "Strip contact fields",
@@ -64,7 +70,7 @@
     {
       "parameters": {
         "operation": "upsert",
-        "base": "={{ $env.AIRTABLE_BASE_ID }}",
+        "base": "={{ $json.airtable_base_id }}",
         "table": "Restricted",
         "columns": {
           "mappingMode": "defineBelow",
@@ -89,7 +95,7 @@
     {
       "parameters": {
         "operation": "upsert",
-        "base": "={{ $env.AIRTABLE_BASE_ID }}",
+        "base": "={{ $json.airtable_base_id }}",
         "table": "Leads",
         "columns": {
           "mappingMode": "defineBelow",
@@ -102,6 +108,7 @@
             "Email": "={{ $json.email }}",
             "Phone": "={{ $json.phone }}",
             "State": "={{ $json.state }}",
+            "Gender": "={{ $json.gender }}",
             "ZIP": "={{ $json.zip }}",
             "Disposition": "={{ $json.disposition }}",
             "UTM Source": "={{ $json.utm_source }}",

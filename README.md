@@ -20,18 +20,41 @@ The build passes (`npm run build`), typechecks clean (`tsc --noEmit`), and both
 |---|---|
 | ✅ | Vercel production deployment linked to project `lexhive-funnel` |
 | ✅ | GTM container `GTM-P34XGVL3` installed — Meta Pixel, GA4 and Clarity are configured there, not in code |
-| ✅ | **Supabase configured** — `schema.sql` applied |
-| ✅ | Server-side env vars on Vercel: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `META_PIXEL_ID`, `META_API_VERSION`, `DRAIN_SECRET`, `OPS_KEY`, `PUBLIC_BASE_URL` |
-| ✅ | 29 tests over the compliance decision, CAPI normalization and the log redactor |
-| ⬜ | `META_CAPI_ACCESS_TOKEN` — **no server event has been delivered yet**, so deduplication is designed but unproven |
-| ⬜ | n8n workflows imported/activated + `N8N_WEBHOOK_URL` — nothing triggers the drain until this is done |
-| ⬜ | Airtable base + `SLACK_WEBHOOK_URL` |
-| ⬜ | GTM container exported into `gtm/` |
-| ⬜ | Meta Test Events verification (Browser + Server, deduplicated) |
+| ✅ | **Supabase configured** — `schema.sql` applied (`state_rules`, outbox, `app_events`, `delivery_metrics`, `reconcile_missing_outbox`) |
+| ✅ | Server-side env vars on Vercel: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `META_PIXEL_ID`, `META_API_VERSION`, `DRAIN_SECRET`, `OPS_KEY`, `PUBLIC_BASE_URL`, `META_CAPI_ACCESS_TOKEN`, `N8N_WEBHOOK_URL`, `N8N_INTERNAL_SECRET`, `AIRTABLE_BASE_ID` |
+| ✅ | 29 unit tests + a Playwright E2E suite — all green against the deployed site |
+| ✅ | **Deliveries happen without the external scheduler** — a fresh qualified
+submission auto-delivers to Meta CAPI and the n8n/Airtable webhook in seconds
+(`/api/lead` runs a bounded drain sweep before responding; verified with a real
+submission — both rows `succeeded`, 0 pending, 0 dead). The sweep even healed a
+previously stuck restricted row. Activating the n8n `LexHive Outbox Drain`
+Schedule is still advised as the retry/backlog backstop |
+| ⬜ | GTM container export committed into `gtm/` (currently just `gtm/README.md`) |
+| ⬜ | Meta Test Events verification (Browser + Server, deduplicated) — server events delivered; the in-Meta deduplication screenshot still needs Events Manager |
 
-**To finish:** `docs/setup-airtable-n8n.md` and `docs/gtm-setup.md` are the two
-runbooks. The CAPI token is the first move — it is the only thing standing
-between the design and the evidence that it works.
+**What was tested (deployed site, 2026-09-09):** Playwright E2E (6 tests: load
++ dataLayer cleanliness, qualified Texas, disqualified, restricted New York,
+ops auth, accessibility) — 5 passed, 1 skipped (ops auth) without `OPS_KEY`,
+all 6 passed with it. Then 14 outbox rows were drained: every one delivered,
+both destinations healthy on `/ops` (p50 684 ms / 1941 ms). A fresh completed
+submission enqueued instantly but stayed `pending` past 90 s — proving the
+Schedule trigger, not any delivery code, was the missing link. Fix: `/api/lead`
+now self-triggers a bounded drain sweep (no client-side throttle — `SKIP
+LOCKED` + attempts make overlapping sweeps safe) on every completed submission,
+**before** the response so Vercel cannot freeze it away. Live re-verified in two
+phases: (1) a single qualified TX submission round-tripped in ~4 s, both outbox
+rows `succeeded` without any manual drain, and the sweep back-filled one older
+stuck `restricted` row; (2) a burst of three rapid submissions (2 TX qualified +
+1 NY restricted) — every row auto-delivered plus the earlier `dfd9d4ad` stalled
+rows healed. Post-E2E final check: **36 rows succeeded, 0 pending, 0 dead**.
+`/ops`: both destinations healthy, `problems: []`. The first E2E run's 4
+failures were harness bugs (answered 6 of 7 questions; consent-label substring
+collision), fixed in the suite; no application bug was found.
+
+**To finish:** activate the `LexHive Outbox Drain` workflow in n8n — import
+`n8n/lexhive-outbox-drain.json`, set n8n env `PUBLIC_BASE_URL` and `DRAIN_SECRET`
+to the Vercel values, and flip it on. Then `docs/gtm-setup.md` (export the
+container into `gtm/`) and the Meta Test Events deduplication screenshot.
 
 ---
 
@@ -50,7 +73,7 @@ POST /api/drain  (triggered by n8n Schedule, every 60s)
    ├──► Meta Conversions API      dedup via shared event_id
    └──► n8n webhook ──► Airtable  upsert on Lead ID
              │
-             └─ failure ──► exponential backoff ──► dead-letter ──► Slack
+             └─ failure ──► exponential backoff ──► dead-letter ──► /ops + Sentry
 ```
 
 The one decision everything else follows from: **the request is finished the
@@ -61,7 +84,7 @@ moment Postgres commits.** Meta and Airtable are deliveries, not dependencies.
 ## Tracking quality
 
 **Tag management.** Every browser tag — Meta Pixel, GA4, Microsoft Clarity —
-is configured in GTM container `GTM-P34XGVL3`. The app pushes three events to
+is configured in GTM container `GTM-P34XGVL3`. The app pushes four events to
 the dataLayer (`src/lib/datalayer.ts`) and the container decides who hears about
 them, so adding a vendor is a container change rather than a deploy. The
 container export lives in `gtm/`, for the same reason the n8n workflows do:
@@ -138,7 +161,7 @@ what the form collects. No tag fires on `/ops`.
 | 5-minute lease | Rows stuck in `delivering` self-release |
 | Jittered exponential backoff | 1m → 32m, no retry stampede |
 | `retryable` classification | Meta 4xx is dead on arrival; only 429/5xx retry |
-| Dead-letter + Slack alert | Bounded failure that a human is told about |
+| Dead-letter + ops visibility | Bounded failure visible and replayable by a human |
 | `/ops` replay | Recovery is a button, not a database query |
 
 `attempts` is incremented in exactly one place — `claim_outbox_batch`. The
@@ -166,7 +189,7 @@ question inflating every count on `/ops` by a factor of six.
   in the n8n Code node before Airtable. Not an Airtable view: a view is a
   display filter, and the data would still be in the base.
 - Restricted leads are sent to the Conversions API with Limited Data Use set.
-- Slack alerts carry `lead_id` and an ops link. Never a name, phone, or email.
+- Operational events carry IDs and status only—never a name, phone, or email.
 - `/ops` returns no personal data at all, and its key travels in a header — a
   query parameter would put it in browser history, referrers, and access logs.
 - The TCPA consent artifact stores the exact consent **text**, its version,
@@ -200,7 +223,7 @@ and completion rate are the same variable.
 
 **Assumed** the funnel is a US Social Security disability offer, since the
 reference funnel is SSDI. Phone normalization assumes a US country code and
-drops anything that isn't ten digits rather than guessing.
+drops anything that is not a valid ten-digit US number (with an optional leading 1).
 
 **Contact capture placement.** I kept contact capture at the end, matching the
 reference funnel. Moving it one step earlier would enrich every subsequent event
@@ -282,9 +305,66 @@ npm run verify      # all of the above plus the build
 
 ---
 
+## End-to-end tests (Playwright)
+
+A Playwright suite (`tests/funnel.e2e.spec.ts`) drives the **deployed** funnel
+at `BASE_URL` — every step, every API call, and the real `/api/lead` responses.
+Submissions write real rows to the production Postgres, and the test email is
+generated per run so nothing is reused.
+
+1. **Install the browser:**
+
+   ```bash
+   npx playwright install chromium
+   ```
+
+2. **Run the suite:**
+
+   ```bash
+   npm run test:e2e
+   ```
+
+3. **Headed mode** (watch it click):
+
+   ```bash
+   npm run test:e2e:headed
+   ```
+
+4. **Debug mode** (Playwright Inspector + step-by-step):
+
+   ```bash
+   npm run test:e2e:debug
+   ```
+
+Tests run serially in one worker — submissions share the production database and
+must not interleave. Retries are enabled only in CI; locally a flake fails
+loudly instead of hiding. Artifacts (screenshots, video, traces) are kept only
+for failures, under `test-results/` and `playwright-report/`.
+
+**Environment variables** (copy `.env.e2e.example` → `.env.e2e`; the real
+environment always wins):
+
+| Variable | Required | Purpose |
+|---|---|---|
+| `BASE_URL` | optional | Deployed funnel origin. Defaults to `https://lexhive.vercel.app` |
+| `OPS_KEY` | optional | Enables the authenticated `/ops` assertions. Empty ⇒ that part skips with a clear reason. **Never commit a real key** |
+| `E2E_FIRST_NAME` | optional | Test lead first name. Defaults to `Playwright` |
+| `E2E_LAST_NAME` | optional | Test lead last name. Defaults to `Test` |
+| `E2E_EMAIL` | optional | Stable test email. Absent ⇒ generated per run (`playwright+<ts>-<tag>@example.com`) |
+| `E2E_PHONE` | optional | Test phone. Absent ⇒ a clearly fictional US number (`5550100100`, reserved 555-01xx exchange) |
+| `E2E_ZIP` | optional | Test ZIP. Defaults to `78701` |
+
+Tests fail on any application-origin page error, console error, or non-2xx
+`/api/lead` response. Third-party noise (GTM, Meta Pixel, Clarity, extensions)
+is explicitly ignored per the documented network policy in
+`tests/funnel.e2e.spec.ts`; contact details are never logged and never appear in
+assertion diffs.
+
+---
+
 ## What I would build next
 
-1. Dataset Quality API polling into the `/ops` view, with a Slack alert when
+1. Dataset Quality API polling into the `/ops` view, with a Sentry alert when
    match rate drops.
 2. Server-side GTM container so the Pixel is proxied first-party rather than
    loaded from `connect.facebook.net`.

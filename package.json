@@ -9,7 +9,10 @@
     "preview": "vite preview",
     "test": "esbuild api/_lib/*.test.ts --bundle --format=esm --platform=node --outdir=.test-build --out-extension:.js=.mjs --log-level=error && node --test .test-build/*.test.mjs",
     "typecheck": "tsc --noEmit",
-    "verify": "npm run typecheck && npm test && npm run build"
+    "verify": "npm run typecheck && npm test && npm run build",
+    "test:e2e": "playwright test",
+    "test:e2e:headed": "playwright test --headed",
+    "test:e2e:debug": "playwright test --debug"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.0",
@@ -17,6 +20,7 @@
     "react-dom": "^18.3.1"
   },
   "devDependencies": {
+    "@playwright/test": "^1.63.0",
     "@types/node": "^20.14.0",
     "@types/react": "^18.3.3",
     "@types/react-dom": "^18.3.0",

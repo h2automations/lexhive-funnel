@@ -10,7 +10,8 @@
  * ---------------------------------------------------------------------------
  * event_id is load-bearing
  * ---------------------------------------------------------------------------
- * `/api/lead` mints the `event_id`, stores it on the lead row, and returns it.
+ * `/api/lead` validates and persists the submission UUID as `event_id`, then
+ * returns the database-authoritative value.
  * The server sends that same id to the Conversions API. For the browser and
  * server events to deduplicate into one conversion, the Meta Pixel tag in GTM
  * MUST map its Event ID field to the `event_id` pushed here.
@@ -76,7 +77,7 @@ export function funnelStep(context: { stepNumber: number; variant: string }): vo
 }
 
 /**
- * The conversion. `event_id` is the server-minted id shared with the
+ * The conversion. `event_id` is the server-persisted id shared with the
  * Conversions API — map it to the Meta tag's Event ID field.
  */
 export function leadSubmitted(context: {
@@ -85,11 +86,20 @@ export function leadSubmitted(context: {
   disposition: string;
 }): void {
   push({
-    event: 'lead_submitted',
+    event: 'application_submitted',
     event_id: context.eventId,
     variant: context.variant,
     // qualified | restricted | disqualified. Useful for excluding restricted
     // leads from optimisation, and non-identifying.
     disposition: context.disposition,
   });
+
+  if (context.disposition === 'qualified') {
+    push({
+      event: 'qualified_lead',
+      event_id: context.eventId,
+      variant: context.variant,
+      disposition: context.disposition,
+    });
+  }
 }

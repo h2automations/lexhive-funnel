@@ -24,11 +24,12 @@ function normalizeEmail(email: string): string {
   return email.trim().toLowerCase();
 }
 
-/** US: digits only, no country code. Anything else is dropped, not guessed. */
+/** US E.164 digits: country code + ten-digit national number. */
 function normalizePhone(phone: string): string {
-  let d = phone.replace(/\D/g, '');
-  if (d.length === 11 && d.startsWith('1')) d = d.slice(1);
-  return d.length === 10 ? d : '';
+  const digits = phone.replace(/\D/g, '');
+  if (digits.length === 10) return `1${digits}`;
+  if (digits.length === 11 && digits.startsWith('1')) return digits;
+  return '';
 }
 
 function normalizeName(name: string): string {
