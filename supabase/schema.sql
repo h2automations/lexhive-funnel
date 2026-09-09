@@ -47,6 +47,10 @@ create table if not exists public.leads (
 alter table public.leads add column if not exists consent_text  text;
 alter table public.leads add column if not exists consent_given boolean;
 
+-- Meta advanced-matching key `ge`. Stored as given ('m' | 'f' | 'undisclosed');
+-- the CAPI client normalizes and drops anything that isn't m or f.
+alter table public.leads add column if not exists gender text;
+
 create index if not exists leads_status_idx  on public.leads (status);
 create index if not exists leads_disp_idx    on public.leads (disposition);
 create index if not exists leads_dedupe_idx  on public.leads (dedupe_key) where dedupe_key is not null;

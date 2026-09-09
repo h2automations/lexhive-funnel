@@ -74,6 +74,51 @@ test('identifiers are normalized before hashing', async () => {
   }
 });
 
+test('gender normalizes to m or f, and opting out sends nothing', async () => {
+  for (const [input, expected] of [['Male', 'm'], ['f', 'f'], ['FEMALE', 'f'], ['m', 'm']] as const) {
+    const { calls, restore } = stubFetch({ ok: true, status: 200, json: { events_received: 1 } });
+    try {
+      await sendMetaEvent({ ...baseArgs, userData: { ge: input } });
+      assert.equal(calls[0]!.body.data[0].user_data.ge, sha256(expected), `${input} -> ${expected}`);
+    } finally {
+      restore();
+    }
+  }
+
+  // "Prefer not to say" must send no field at all, not a hash of a placeholder.
+  const { calls, restore } = stubFetch({ ok: true, status: 200, json: { events_received: 1 } });
+  try {
+    await sendMetaEvent({ ...baseArgs, userData: { ge: 'undisclosed' } });
+    assert.ok(!('ge' in calls[0]!.body.data[0].user_data));
+  } finally {
+    restore();
+  }
+});
+
+test('event_time is the conversion moment, not the delivery attempt', async () => {
+  // The bug this guards: the drain retries with backoff to a 32-minute ceiling,
+  // so stamping Date.now() at delivery reports the conversion in the wrong hour
+  // and, after a long outage, can push it outside the attribution window.
+  const convertedAt = 1_700_000_000;
+  const { calls, restore } = stubFetch({ ok: true, status: 200, json: { events_received: 1 } });
+
+  try {
+    await sendMetaEvent({ ...baseArgs, userData: {}, eventTime: convertedAt });
+    assert.equal(calls[0]!.body.data[0].event_time, convertedAt);
+  } finally {
+    restore();
+  }
+
+  const now = stubFetch({ ok: true, status: 200, json: { events_received: 1 } });
+  try {
+    await sendMetaEvent({ ...baseArgs, userData: {} });
+    const stamped = now.calls[0]!.body.data[0].event_time;
+    assert.ok(Math.abs(stamped - Date.now() / 1000) < 5, 'falls back to now when unknown');
+  } finally {
+    now.restore();
+  }
+});
+
 test('an unusable phone number is dropped, not hashed into noise', async () => {
   const { calls, restore } = stubFetch({ ok: true, status: 200, json: { events_received: 1 } });
 

@@ -172,6 +172,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     last_name: truncate(contact.lastName, 100),
     state: stateCode || null,
     zip: truncate(contact.zip, 10),
+    gender: truncate(answers.gender?.a, 20),
     consent_version: truncate(consent.version, 32),
     consent_text: truncate(consent.text, 2000),
     consent_given: typeof consent.given === 'boolean' ? consent.given : null,

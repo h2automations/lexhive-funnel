@@ -46,6 +46,14 @@ function normalizeZip(zip: string): string {
   return d.length >= 5 ? d.slice(0, 5) : '';
 }
 
+/** Meta accepts a single lowercase letter: m or f. Anything else is dropped. */
+function normalizeGender(gender: string): string {
+  const g = gender.trim().toLowerCase();
+  if (g.startsWith('m')) return 'm';
+  if (g.startsWith('f')) return 'f';
+  return '';
+}
+
 function normalizeCountry(country: string): string {
   const c = country.trim().toLowerCase().replace(/[^a-z]/g, '');
   return c.length === 2 ? c : '';
@@ -59,6 +67,7 @@ export interface CapiUserData {
   ct?: string | null;
   st?: string | null;
   zp?: string | null;
+  ge?: string | null;
   country?: string | null;
   external_id?: string | null;
   client_ip_address?: string | null;
@@ -101,6 +110,17 @@ export async function sendMetaEvent(args: {
   testEventCode?: string;
   eventSourceUrl?: string;
   actionSource?: string;
+  /**
+   * Unix seconds of the ORIGINAL conversion, not of this delivery attempt.
+   *
+   * The drain retries with backoff to a 32-minute ceiling over six attempts, so
+   * a lead delivered on attempt four would otherwise reach Meta stamped about
+   * an hour after the person actually converted. That misattributes the
+   * conversion to the wrong hour, and after a long outage can push it outside
+   * the attribution window altogether — the retry machinery quietly corrupting
+   * the data it exists to protect.
+   */
+  eventTime?: number;
   /** Limited Data Use — set for leads from states we treat as restricted. */
   limitedDataUse?: boolean;
 }): Promise<CapiResult> {
@@ -115,6 +135,7 @@ export async function sendMetaEvent(args: {
     eventSourceUrl,
     actionSource = 'website',
     limitedDataUse = false,
+    eventTime,
   } = args;
 
   if (!accessToken) {
@@ -132,6 +153,7 @@ export async function sendMetaEvent(args: {
     ct: hashed(userData.ct, normalizeName),
     st: hashed(userData.st, normalizeState),
     zp: hashed(userData.zp, normalizeZip),
+    ge: hashed(userData.ge, normalizeGender),
     country: hashed(userData.country, normalizeCountry),
     external_id: hashed(userData.external_id, (v) => v.trim()),
     client_ip_address: userData.client_ip_address || undefined,
@@ -146,7 +168,8 @@ export async function sendMetaEvent(args: {
 
   const payload: CapiPayload = {
     event_name: eventName,
-    event_time: Math.floor(Date.now() / 1000),
+    // Falls back to now only when the caller has no conversion timestamp.
+    event_time: eventTime ?? Math.floor(Date.now() / 1000),
     event_id: eventId,
     user_data,
     action_source: actionSource,

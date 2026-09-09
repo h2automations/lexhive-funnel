@@ -1,6 +1,6 @@
 # Wiring up the automation layer
 
-The two workflows in `n8n/` are exports. This is what turns them into something
+The three workflows in `n8n/` are exports. This is what turns them into something
 a reviewer can click. Roughly 20 minutes.
 
 Field names below are **exact** — the n8n nodes map to them by name, so a
@@ -23,6 +23,7 @@ Create a base called **LexHive Leads** with two tables.
 | `Email` | Email | |
 | `Phone` | Phone number | |
 | `State` | Single line text | Two-letter code |
+| `Gender` | Single select | `m`, `f`, `undisclosed` |
 | `ZIP` | Single line text | Text, not Number — leading zeros matter |
 | `Disposition` | Single select | `qualified`, `restricted`, `disqualified` |
 | `UTM Source` | Single line text | |
@@ -56,7 +57,15 @@ this base only. Copy the base ID from the URL (`airtable.com/appXXXXXXXX/…`).
 
 ## 2. n8n
 
-**Import.** Workflows → Import from File, once for each file in `n8n/`.
+**Import.** Workflows → Import from File, once for each file in `n8n/` — there
+are three: lead routing, the outbox drain, and error alerts.
+
+**Error alerts.** `lexhive-error-alerts.json` is an Error Trigger workflow that
+posts to Slack when any other workflow fails. Set `SLACK_WEBHOOK_URL` in n8n's
+environment, then open each of the other two workflows → Settings → **Error
+Workflow** → select it. Without this, an Airtable node failing *after* the
+webhook has already responded 200 leaves the outbox recording a success that
+never happened — the one gap the retry machinery cannot see.
 
 **Credentials.** On both Airtable nodes, add the personal access token. Set the
 `AIRTABLE_BASE_ID` environment variable in n8n to the base ID, or replace the

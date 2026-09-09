@@ -1,0 +1,49 @@
+{
+  "name": "LexHive Error Alerts",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "error-trigger",
+      "name": "On workflow error",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "// A failure inside n8n is invisible to the outbox in one specific way: the\n// drain sees a non-2xx from the webhook and retries correctly, but if the\n// Airtable node fails AFTER the webhook has already responded 200, the outbox\n// records a success that never happened. That is the gap this workflow closes.\n//\n// No lead data in the alert — a lead id and a link, same rule /ops follows.\n\nconst e = $input.first().json;\n\nconst workflow = e.workflow?.name ?? 'unknown workflow';\nconst node = e.execution?.lastNodeExecuted ?? 'unknown node';\nconst message = (e.execution?.error?.message ?? 'no message').slice(0, 300);\nconst url = e.execution?.url ?? '';\n\nreturn [{\n  json: {\n    text: [\n      `:rotating_light: LexHive automation failure`,\n      `*Workflow:* ${workflow}`,\n      `*Node:* ${node}`,\n      `*Error:* ${message}`,\n      url ? `<${url}|Open execution>` : '',\n    ].filter(Boolean).join('\\n'),\n  },\n}];"
+      },
+      "id": "format-alert",
+      "name": "Format alert",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [220, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SLACK_WEBHOOK_URL }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ text: $json.text }) }}",
+        "options": {}
+      },
+      "id": "slack",
+      "name": "Slack",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [440, 0]
+    }
+  ],
+  "connections": {
+    "On workflow error": {
+      "main": [[{ "node": "Format alert", "type": "main", "index": 0 }]]
+    },
+    "Format alert": {
+      "main": [[{ "node": "Slack", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

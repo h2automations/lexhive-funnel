@@ -24,43 +24,49 @@ paid by the person filling in the form.
 ## Trade-offs
 
 **Deduplication is server-authoritative.** `/api/lead` mints the `event_id`,
-stores it and returns it; the browser fires `fbq('track','Lead',…,{eventID})`
-with that exact value and the drain sends the same one to the CAPI. The common
-pattern — minting client-side and hoping the server echoes it — breaks silently
-on any retry. This way a mismatch is structurally impossible.
+stores it and returns it; the browser Pixel fires with that exact value and the
+drain sends the same one to the CAPI. Minting client-side and hoping the server
+echoes it breaks silently on any retry — this way a mismatch is structurally
+impossible.
 
 **All browser tags live in GTM**, not in the code. The app publishes three
 dataLayer events and the container fires Meta, GA4 and Clarity from them, so a
 new vendor is a container change rather than a deploy. The trade is real and
 worth naming: the dedup now depends on the Pixel tag's Event ID field being
 mapped to `{{DLV - event_id}}`, and if it isn't, nothing errors and every
-conversion is counted twice. The container export is committed alongside the
-n8n workflows so that field is reviewable.
+conversion is counted twice. The container is exported into `gtm/` alongside
+the n8n workflows so that field is reviewable in a diff rather than buried in
+a UI.
 
-**No city is sent to Meta.** The funnel doesn't collect one. Filling `ct` with
-the state to have something there costs match quality rather than adding it. I
-added a ZIP field instead: one input, and a real match key.
+**`event_time` is the conversion moment, not the delivery attempt.** The drain
+retries with backoff to a 32-minute ceiling over six attempts, so stamping
+`Date.now()` at delivery would report a retried lead in the wrong hour and,
+after a long outage, push it outside the attribution window entirely — the
+retry machinery quietly corrupting the data it exists to protect. The lead row
+already knows when the person actually converted, so that is what is sent.
 
-**n8n schedules the drain instead of Vercel Cron.** The Hobby plan caps cron at
-once per day, useless for a 60-second retry loop — and it turned out to be the
-better design anyway, because the automation layer visibly orchestrates recovery
-instead of a hidden platform cron.
+**Match keys are chosen, not maximised.** `ct` is not sent — the funnel has no
+city, and filling it with the state costs match quality rather than adding it.
+Deriving city from ZIP is the obvious next gain but needs a lookup table this
+funnel doesn't justify carrying. ZIP and gender *are* asked: one tap each, both
+real keys. "Prefer not to say" maps to a value the CAPI client drops rather
+than hashes, so opting out sends Meta nothing rather than a placeholder.
+
+**n8n schedules the drain, not Vercel Cron.** The Hobby plan caps cron at once
+per day, useless for a 60-second retry loop — and the automation layer visibly
+orchestrating recovery beats a hidden platform cron anyway.
 
 **Contact capture stays at the end**, matching the reference funnel. Moving it
-one step earlier would enrich every subsequent event at some cost to completion.
-That's an A/B test, not an assumption, and the variant plumbing is already
-there — the variant is read from the URL path and lands on every lead row and
-every Meta event.
+earlier would enrich every subsequent event at some cost to completion — an A/B
+test, not an assumption, and the variant plumbing is already in the URL path.
 
-**Health signals are kept out of the ad platforms.** Meta flagged this domain
-under its Business Tool Terms as *"associated with medical conditions"* — the
-real constraint in this vertical, and one the funnel's own questions provoke.
-So the browser events carry a step **ordinal** and nothing more: never the
-answer, and never the question's semantic id, because `question: "doctor"` is
-itself a contribution to that classification. The ordinals give the same
-drop-off curve; the semantic ids live in our `app_events` table, which is our
-database rather than an ad platform's. Contact fields are masked out of Clarity
-in the markup rather than by dashboard setting.
+**Health signals stay out of the ad platforms.** Meta flagged this domain under
+its Business Tool Terms as *"associated with medical conditions"* — the real
+constraint in this vertical. So browser events carry a step **ordinal** and
+nothing more: not the answer, and not the question's semantic id, since
+`question: "doctor"` feeds that classification itself. Same drop-off curve.
+Semantic ids stay in `app_events`, our database rather than an ad platform's,
+and contact fields are masked out of Clarity in the markup.
 
 **Restriction is decided server-side.** The browser is told its disposition; it
 never decides. A compliance rule enforced in client code is a compliance rule
@@ -68,22 +74,21 @@ one devtools console away from being ignored.
 
 ## Extra, beyond the brief
 
-- **Partial saves.** Every answer updates one lead row, so an abandoned funnel
+- **Partial saves** — every answer updates one lead row, so an abandoned funnel
   leaves a recoverable record and a per-step drop-off point.
 - **`/ops`** — delivery health, p50/p95 latency, and a replay button. Recovery
   has to be something a non-engineer can do at 2am; a delivery only an engineer
   with database access can replay isn't recoverable, it's logged.
-- **Observability.** Structured JSON logs to a drain, Sentry for exceptions, and
-  an `app_events` table for the domain events `/ops` reports on. No personal
-  data reaches any of them — enforced by a redactor with tests, not by a
-  convention every call site has to remember.
-- **Accessibility as a conversion argument.** The audience is people over 40 who
-  can't work, on a phone, often with a vision or motor impairment. 4rem targets,
-  one question per screen, focus moved for screen readers, and a rem-based scale
-  so enlarged device fonts actually enlarge the page. For this audience,
-  legibility and completion rate are the same variable.
-- **27 tests** covering the compliance decision, CAPI normalization and the log
-  redactor — the three places where a bug is silent rather than loud.
+- **Observability** — structured JSON logs to a drain, Sentry for exceptions, an
+  `app_events` table for domain events. No personal data reaches any of them,
+  enforced by a tested redactor rather than by every call site remembering.
+- **Accessibility as a conversion argument** — 4rem targets, one question per
+  screen, focus moved for screen readers, a rem-based scale so enlarged device
+  fonts actually enlarge the page. For an audience of people over 40 who can't
+  work, often on a phone with a vision impairment, legibility and completion
+  rate are the same variable.
+- **29 tests** over the compliance decision, CAPI normalization and the log
+  redactor — the three places a bug is silent rather than loud.
 
 ## Known gaps
 

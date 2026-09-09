@@ -107,6 +107,7 @@ async function deliverMeta(row: OutboxRow): Promise<DeliveryResult> {
       // state — a wrong value is worse than a missing one for match quality.
       st: lead.state,
       zp: lead.zip,
+      ge: lead.gender,
       country: 'US',
       external_id: lead.external_id,
       client_ip_address: lead.client_ip,
@@ -114,6 +115,10 @@ async function deliverMeta(row: OutboxRow): Promise<DeliveryResult> {
       fbp: lead.fbp,
       fbc: lead.fbc,
     },
+    // The moment the person converted, not the moment this attempt runs.
+    eventTime: lead.submitted_at
+      ? Math.floor(new Date(lead.submitted_at).getTime() / 1000)
+      : undefined,
     testEventCode: process.env.META_TEST_EVENT_CODE,
     eventSourceUrl: baseUrl ? `${baseUrl}/${lead.variant}` : undefined,
     limitedDataUse: restricted,

@@ -44,6 +44,18 @@ const YES_NO: Option[] = [
 
 const QUESTIONS: { id: string; q: string; o: Option[] }[] = [
   { id: 'age', q: 'Are you between 18 and 64 years old?', o: YES_NO },
+  // Gender is a Meta advanced-matching key (`ge`), and one tap. "Prefer not to
+  // say" maps to a value the CAPI client drops rather than hashes, so opting
+  // out costs the person nothing and sends Meta nothing.
+  {
+    id: 'gender',
+    q: 'What is your gender?',
+    o: [
+      { label: 'Male', value: 'm' },
+      { label: 'Female', value: 'f' },
+      { label: 'Prefer not to say', value: 'undisclosed' },
+    ],
+  },
   { id: 'state', q: 'Which state do you live in?', o: STATES },
   { id: 'work', q: 'Are you unable to work because of a medical condition?', o: YES_NO },
   {

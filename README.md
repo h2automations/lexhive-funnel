@@ -19,21 +19,19 @@ The build passes (`npm run build`), typechecks clean (`tsc --noEmit`), and both
 | Status | Item |
 |---|---|
 | ✅ | Vercel production deployment linked to project `lexhive-funnel` |
-| ✅ | Meta Pixel installed — dataset `27653864700958179` |
-| ✅ | `VITE_META_PIXEL_ID` set as a Vercel production env var |
-| ✅ | **Supabase configured** — `schema.sql` applied (leads, state_rules, delivery_outbox, claim_outbox_batch, lead_counts, outbox_health, RLS all live) |
+| ✅ | GTM container `GTM-P34XGVL3` installed — Meta Pixel, GA4 and Clarity are configured there, not in code |
+| ✅ | **Supabase configured** — `schema.sql` applied |
 | ✅ | Server-side env vars on Vercel: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `META_PIXEL_ID`, `META_API_VERSION`, `DRAIN_SECRET`, `OPS_KEY`, `PUBLIC_BASE_URL` |
-| ✅ | Drain ESM import fixed (`./_lib/meta-capi.js`) — was `ERR_MODULE_NOT_FOUND` |
-| ✅ | End-to-end verified: partial save → complete submit → outbox enqueue → drain claim → retryable backoff → `/ops` health summary |
-| ⬜ | `META_CAPI_ACCESS_TOKEN` — needed for server-side Meta events to deliver |
-| ⬜ | n8n workflows imported/activated + `N8N_WEBHOOK_URL` set for Airtable delivery |
-| ⬜ | Airtable base + Slack webhook configured |
-| ⬜ | Meta Test Events verification (dedup + match quality) |
+| ✅ | 29 tests over the compliance decision, CAPI normalization and the log redactor |
+| ⬜ | `META_CAPI_ACCESS_TOKEN` — **no server event has been delivered yet**, so deduplication is designed but unproven |
+| ⬜ | n8n workflows imported/activated + `N8N_WEBHOOK_URL` — nothing triggers the drain until this is done |
+| ⬜ | Airtable base + `SLACK_WEBHOOK_URL` |
+| ⬜ | GTM container exported into `gtm/` |
+| ⬜ | Meta Test Events verification (Browser + Server, deduplicated) |
 
-**To finish:** add `META_CAPI_ACCESS_TOKEN` on Vercel for server-side Meta
-events, then import and activate the two workflows in `n8n/` and set
-`N8N_WEBHOOK_URL`. Airtable and Slack are configured in n8n per the setup
-guide.
+**To finish:** `docs/setup-airtable-n8n.md` and `docs/gtm-setup.md` are the two
+runbooks. The CAPI token is the first move — it is the only thing standing
+between the design and the evidence that it works.
 
 ---
 
@@ -83,7 +81,7 @@ no error, a green tick in Preview — and every conversion is counted twice. Tha
 is the real cost of moving tags into a container, and it is why the mapping is
 the first thing `docs/gtm-setup.md` verifies.
 
-**Identifiers sent.** `em`, `ph`, `fn`, `ln`, `st`, `zp`, `country`, and
+**Identifiers sent.** `em`, `ph`, `fn`, `ln`, `st`, `zp`, `ge`, `country`, and
 `external_id`, each normalized before hashing; `client_ip_address`,
 `client_user_agent`, `fbp`, and `fbc` unhashed. `st` is the two-letter code
 lowercased and `zp` is the five-digit ZIP asked for on the contact step —
@@ -107,12 +105,13 @@ pageview and persisted. Capturing at submit is too late: the query string is
 gone after the first route change. Cookie identifiers are re-read at submit,
 since the Pixel often writes `_fbp` after first paint.
 
-**Step events.** Funnel steps fire as `trackCustom('FunnelStep', …)`. They are
-not standard events, and sending them through `track` has Meta discard them as
-unrecognised names.
+**`event_time`.** The conversion moment from the lead row, not the moment the
+delivery attempt runs. With a 32-minute backoff ceiling over six attempts, the
+difference is the wrong reporting hour at best and a missed attribution window
+at worst.
 
-**`external_id`.** A first-party session UUID is set in the Pixel's advanced
-matching and sent hashed in `user_data`. It survives cookie loss mid-funnel and
+**`external_id`.** A first-party session UUID, published on the dataLayer for
+the Pixel's advanced matching and sent hashed in `user_data` from the server. It survives cookie loss mid-funnel and
 costs nothing.
 
 **What the tags are not given** matters more than what they are. The funnel asks
