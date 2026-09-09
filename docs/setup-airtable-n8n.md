@@ -71,10 +71,35 @@ from the Webhook node — that value is `N8N_WEBHOOK_URL` in the next step. Chec
 the flow reads Webhook → Restricted state? → *(true)* Strip contact fields →
 Airtable Restricted, *(false)* Flatten payload → Airtable Leads.
 
-**Outbox drain workflow.** Set two environment variables in n8n:
+**Outbox drain workflow.** Its config comes from Supabase, not from n8n
+environment variables. This instance runs with `N8N_BLOCK_ENV_ACCESS_IN_NODE`
+enabled, so `{{ $env.PUBLIC_BASE_URL }}` inside a node resolves to the string
+`[ERROR: access to env vars denied]` — the node does not throw, it POSTs to a
+URL made of that error text and fails on every schedule tick.
 
-- `PUBLIC_BASE_URL` = `https://lexhive.vercel.app`
-- `DRAIN_SECRET` = the same value as on Vercel
+1. Run the `app_config` block at the bottom of `supabase/schema.sql`, then seed
+   the single row:
+
+   ```sql
+   insert into public.app_config (id, public_base_url, drain_secret)
+   values (1, 'https://lexhive.vercel.app', '<the same DRAIN_SECRET set in Vercel>')
+   on conflict (id) do update
+     set public_base_url = excluded.public_base_url,
+         drain_secret    = excluded.drain_secret,
+         updated_at      = now();
+   ```
+
+   RLS is on with no policy granted, so only the service role can read it.
+
+2. In n8n, create a **Supabase** credential named
+   `LexHive Supabase (service role)` — host `https://<project>.supabase.co`,
+   service-role key. That credential is the only secret involved, and it lives
+   in n8n's encrypted credential store, which is where a secret belongs.
+
+3. Import `n8n/lexhive-outbox-drain.json`. The flow is
+   Schedule → Load config → Require config → Call drain. `Require config`
+   throws a named error when the row is missing, so a misconfiguration shows up
+   as a failed execution rather than a workflow that quietly does nothing.
 
 Activate it. **Nothing is delivered until this workflow is running** — it is the
 only thing that calls `/api/drain`, so without it no lead reaches Meta or

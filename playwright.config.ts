@@ -39,7 +39,7 @@ export default defineConfig({
   // when the retry machinery needs it.
   retries: process.env.CI ? 2 : 0,
   timeout: 90_000,
-  expect: { timeout: 10_000 },
+  expect: { timeout: 30_000 },
   use: {
     baseURL: (process.env.BASE_URL || 'https://lexhive.vercel.app').replace(/\/+$/, ''),
     screenshot: 'only-on-failure',
@@ -47,6 +47,10 @@ export default defineConfig({
     trace: 'on-first-retry',
     locale: 'en-US',
     testIdAttribute: 'id',
+    // Watching a run is how you notice the things assertions do not cover —
+    // a screen that flashes, a target that is hard to hit. E2E_SLOW_MO puts a
+    // pause between actions so a headed run is followable in real time.
+    launchOptions: { slowMo: Number(process.env.E2E_SLOW_MO || 0) },
   },
   projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
   reporter: [

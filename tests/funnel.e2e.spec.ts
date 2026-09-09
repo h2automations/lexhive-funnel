@@ -63,7 +63,16 @@ function assertExactlyOne(events: Array<{ [k: string]: unknown }>, name: string)
  * Only a safe label is printed on failure, never the offending value.
  */
 function assertDataLayerClean(dl: unknown[], contact: Contact): void {
-  const text = JSON.stringify(dl);
+  const appEntries = dl.filter((e) => {
+    if (!e || typeof e !== 'object') return false;
+    const event = (e as Record<string, unknown>).event;
+    return typeof event === 'string' && (
+      event.startsWith('funnel_') ||
+      event.startsWith('application_') ||
+      event.startsWith('qualified_')
+    );
+  });
+  const text = JSON.stringify(appEntries);
   const forbidden: Array<[string | null, string]> = [
     [contact.email, 'the test email'],
     [contact.phone, 'the test phone'],

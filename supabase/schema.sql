@@ -347,3 +347,43 @@ create policy "service only" on public.app_events
 revoke all on function public.lead_counts() from anon;
 revoke all on function public.claim_outbox_batch(int) from anon;
 revoke all on function public.delivery_metrics(int) from anon;
+
+-- ---------------------------------------------------------------------------
+-- Runtime configuration for the automation layer
+-- ---------------------------------------------------------------------------
+-- The n8n instance at automation.seerbusiness.com runs with
+-- N8N_BLOCK_ENV_ACCESS_IN_NODE enabled, so `{{ $env.PUBLIC_BASE_URL }}` in a
+-- node resolves to "[ERROR: access to env vars denied]" rather than throwing.
+-- The drain workflow POSTed to that string every 60 seconds and failed every
+-- time, which is the exact failure this system is meant to make visible.
+--
+-- Config now lives here instead: one row, read by the workflow through the
+-- Supabase credential that n8n already holds in its encrypted credential
+-- store. Rotating the drain secret is one UPDATE plus the matching Vercel env
+-- var, with no workflow edit and no redeploy.
+--
+-- Single row by construction: the check constraint makes a second row an
+-- error rather than a silent ambiguity about which config is live.
+create table if not exists public.app_config (
+  id              smallint primary key default 1 check (id = 1),
+  public_base_url text not null,
+  drain_secret    text not null,
+  updated_at      timestamptz not null default now()
+);
+
+alter table public.app_config enable row level security;
+
+-- No policy is granted, so anon and authenticated see nothing at all. Only the
+-- service role, which bypasses RLS, can read this table.
+drop policy if exists "service only" on public.app_config;
+create policy "service only" on public.app_config
+  for all using (false) with check (false);
+
+-- Seed it once, with the real values:
+--
+--   insert into public.app_config (id, public_base_url, drain_secret)
+--   values (1, 'https://lexhive.vercel.app', '<the same DRAIN_SECRET set in Vercel>')
+--   on conflict (id) do update
+--     set public_base_url = excluded.public_base_url,
+--         drain_secret    = excluded.drain_secret,
+--         updated_at      = now();

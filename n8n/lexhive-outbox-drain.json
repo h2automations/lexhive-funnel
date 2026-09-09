@@ -20,33 +20,72 @@
     },
     {
       "parameters": {
+        "operation": "getAll",
+        "tableId": "app_config",
+        "returnAll": true,
+        "options": {}
+      },
+      "id": "load-config",
+      "name": "Load config",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [200, 0],
+      "notes": "Runtime config lives in one Supabase row, not in n8n env vars. This n8n instance blocks $env access in nodes (N8N_BLOCK_ENV_ACCESS_IN_NODE), so $env.PUBLIC_BASE_URL silently resolved to an error string and every drain call failed. The Supabase credential is the only secret, and it lives in n8n's encrypted credential store where a secret belongs.",
+      "credentials": {
+        "supabaseApi": {
+          "name": "LexHive Supabase (service role)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Fail loudly rather than POSTing to \"undefined/api/drain\".\n// A drain that silently stops is the failure mode this whole system is\n// built to avoid: the outbox keeps filling, nothing errors, and the first\n// symptom is a lead that never reached Airtable.\nconst row = $input.first()?.json ?? {};\n\nconst baseUrl = String(row.public_base_url ?? '').trim().replace(/\\/+$/, '');\nconst drainSecret = String(row.drain_secret ?? '').trim();\n\nif (!baseUrl || !drainSecret) {\n  throw new Error(\n    'app_config is missing public_base_url or drain_secret. ' +\n      'Insert the row in Supabase (see supabase/schema.sql) before this workflow can run.'\n  );\n}\n\nreturn [{ json: { baseUrl, drainSecret } }];"
+      },
+      "id": "require-config",
+      "name": "Require config",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [400, 0]
+    },
+    {
+      "parameters": {
         "method": "POST",
-        "url": "={{ $env.PUBLIC_BASE_URL }}/api/drain",
+        "url": "={{ $json.baseUrl }}/api/drain",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
             {
               "name": "x-drain-secret",
-              "value": "={{ $env.DRAIN_SECRET }}"
+              "value": "={{ $json.drainSecret }}"
             }
           ]
         },
-        "options": {}
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "neverError": false
+            }
+          }
+        }
       },
       "id": "http-drain",
       "name": "Call drain",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [200, 0]
+      "position": [600, 0],
+      "notes": "A non-2xx here throws, which marks the execution failed and lets the error workflow alert. Rotating the drain secret is one UPDATE on app_config plus the matching Vercel env var — no workflow edit."
     }
   ],
   "connections": {
     "Schedule": {
-      "main": [
-        [
-          { "node": "Call drain", "type": "main", "index": 0 }
-        ]
-      ]
+      "main": [[{ "node": "Load config", "type": "main", "index": 0 }]]
+    },
+    "Load config": {
+      "main": [[{ "node": "Require config", "type": "main", "index": 0 }]]
+    },
+    "Require config": {
+      "main": [[{ "node": "Call drain", "type": "main", "index": 0 }]]
     }
   },
   "settings": {

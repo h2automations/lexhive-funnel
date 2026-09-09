@@ -51,9 +51,11 @@ rows healed. Post-E2E final check: **36 rows succeeded, 0 pending, 0 dead**.
 failures were harness bugs (answered 6 of 7 questions; consent-label substring
 collision), fixed in the suite; no application bug was found.
 
-**To finish:** activate the `LexHive Outbox Drain` workflow in n8n — import
-`n8n/lexhive-outbox-drain.json`, set n8n env `PUBLIC_BASE_URL` and `DRAIN_SECRET`
-to the Vercel values, and flip it on. Then `docs/gtm-setup.md` (export the
+**To finish:** activate the `LexHive Outbox Drain` workflow in n8n — seed
+`public.app_config` (see `supabase/schema.sql`), add the Supabase service-role
+credential in n8n, import `n8n/lexhive-outbox-drain.json`, and flip it on. The
+workflow reads its base URL and drain secret from that Supabase row rather than
+from n8n environment variables, which this instance blocks inside nodes. Then `docs/gtm-setup.md` (export the
 container into `gtm/`) and the Meta Test Events deduplication screenshot.
 
 ---

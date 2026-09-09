@@ -1,5 +1,6 @@
 import { expect, test } from '@playwright/test';
 import {
+  APP_HOST,
   DONE_HEADING,
   FUNNEL_PATH,
   UUID_RE,
@@ -82,16 +83,29 @@ test.describe('tag integration', () => {
 
   test('the browser Lead event carries the event_id the server persisted', async ({ page }) => {
     const pixel: URL[] = [];
+    const leaked: string[] = [];
+    const contact = makeContact('dedup');
+
     page.on('request', (request) => {
       const url = request.url();
       if (url.includes(PIXEL_HOST)) pixel.push(new URL(url));
+
+      // The privacy guarantee, checked on the wire rather than on the
+      // dataLayer. Meta receives these identifiers hashed, from the SERVER via
+      // the Conversions API — never in plaintext from the browser. Only the
+      // label is recorded, never the value: this array is printed on failure.
+      if (new URL(url).host.endsWith(APP_HOST)) return;
+      const haystack = `${url} ${request.postData() ?? ''}`;
+      for (const [label, value] of Object.entries(contact)) {
+        if (value && haystack.includes(value)) leaked.push(`${label} -> ${new URL(url).host}`);
+      }
     });
 
     await gotoFunnel(page);
     await answerAllQualifying(page);
 
     const complete = waitForCompleteResponse(page);
-    await submitContact(page, makeContact('dedup'));
+    await submitContact(page, contact);
     const res = await complete;
 
     expect(res.status()).toBe(200);
@@ -114,6 +128,8 @@ test.describe('tag integration', () => {
       lead!.searchParams.get('eid'),
       'the Lead tag is not sending the server event_id as Event ID — browser and CAPI conversions will not deduplicate'
     ).toBe(eventId);
+
+    expect(leaked, 'contact details reached a third-party host in plaintext').toEqual([]);
   });
 
   test('no ad or analytics tag fires on the ops surface', async ({ page }) => {

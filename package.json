@@ -12,7 +12,8 @@
     "verify": "npm run typecheck && npm test && npm run build",
     "test:e2e": "playwright test",
     "test:e2e:headed": "playwright test --headed",
-    "test:e2e:debug": "playwright test --debug"
+    "test:e2e:debug": "playwright test --debug",
+    "test:e2e:watch": "E2E_SLOW_MO=450 playwright test --headed --workers=1"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.0",
