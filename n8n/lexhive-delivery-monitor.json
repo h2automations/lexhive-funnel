@@ -1,0 +1,152 @@
+{
+  "name": "LexHive Delivery Monitor",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 5
+            }
+          ]
+        }
+      },
+      "id": "monitor-schedule",
+      "name": "Every 5 minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [0, 0],
+      "notes": "Five minutes, matching the liveness timeout in api/_lib/health.ts. Worst-case detection is therefore about ten minutes, which is the trade for an alert that stays quiet enough to be believed."
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "tableId": "app_config",
+        "returnAll": true,
+        "options": {}
+      },
+      "id": "monitor-config",
+      "name": "Load config",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [200, 0],
+      "credentials": {
+        "supabaseApi": {
+          "name": "LexHive Supabase (service role)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.public_base_url }}/api/health",
+        "options": {
+          "timeout": 20000,
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "monitor-check",
+      "name": "Check health",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [400, 0],
+      "notes": "neverError so a 503 — which is the whole point of this workflow — is read rather than thrown. /api/health needs no secret: it returns three ages and a count, and a health check that needs a credential is one nobody wires up."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Fold the health response and the alert destination into one item.\n//\n// A request that failed outright (Vercel down, DNS gone) arrives here with no\n// status field. That is an outage too, and defaulting it to healthy would make\n// this monitor the silent failure it exists to prevent — so anything that is\n// not an explicit 'healthy' counts as degraded.\nconst health = $input.first()?.json ?? {};\nconst config = $('Load config').first()?.json ?? {};\n\nconst status = health.status === 'healthy' ? 'healthy' : 'degraded';\nconst summary =\n  health.summary || health.error || 'no response from /api/health — the app itself may be down';\n\nreturn [\n  {\n    json: {\n      status,\n      summary,\n      drain_age_s: health.drain_age_s ?? null,\n      oldest_waiting_s: health.oldest_waiting_s ?? null,\n      dead_rows: health.dead_rows ?? null,\n      checked_at: health.checked_at ?? new Date().toISOString(),\n      webhook: config.alert_webhook_url || '',\n      text: `:rotating_light: LexHive delivery degraded — ${summary}`,\n    },\n  },\n];"
+      },
+      "id": "monitor-assess",
+      "name": "Assess",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [600, 0]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "is-degraded",
+              "leftValue": "={{ $json.status }}",
+              "rightValue": "degraded",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "monitor-branch",
+      "name": "Degraded?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [800, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.webhook }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ text: $json.text }) }}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "monitor-notify",
+      "name": "Notify",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1020, -100],
+      "onError": "continueRegularOutput",
+      "notes": "Slack-shaped {text}, which most incoming-webhook services accept. onError continues on purpose: an unset or broken webhook must not swallow the failure below it — losing the alert channel is not the same as delivery being fine."
+    },
+    {
+      "parameters": {
+        "errorMessage": "={{ $('Assess').first().json.summary }}"
+      },
+      "id": "monitor-raise",
+      "name": "Raise",
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1,
+      "position": [1240, -100],
+      "notes": "Second, independent channel. Failing the execution puts the outage in n8n's own execution list and failure rate, so the alert survives a webhook that was never configured, was revoked, or points at a channel nobody reads."
+    }
+  ],
+  "connections": {
+    "Every 5 minutes": {
+      "main": [[{ "node": "Load config", "type": "main", "index": 0 }]]
+    },
+    "Load config": {
+      "main": [[{ "node": "Check health", "type": "main", "index": 0 }]]
+    },
+    "Check health": {
+      "main": [[{ "node": "Assess", "type": "main", "index": 0 }]]
+    },
+    "Assess": {
+      "main": [[{ "node": "Degraded?", "type": "main", "index": 0 }]]
+    },
+    "Degraded?": {
+      "main": [[{ "node": "Notify", "type": "main", "index": 0 }], []]
+    },
+    "Notify": {
+      "main": [[{ "node": "Raise", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

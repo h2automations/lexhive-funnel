@@ -104,7 +104,21 @@ URL made of that error text and fails on every schedule tick.
    throws a named error when the row is missing, so a misconfiguration shows up
    as a failed execution rather than a workflow that quietly does nothing.
 
-Activate it. **Nothing is delivered until this workflow is running** — it is the
+**Delivery monitor workflow.** Import `n8n/lexhive-delivery-monitor.json` and
+activate it. It polls `/api/health` every five minutes and is deliberately
+independent of the drain — a monitor that lives inside the workflow it watches
+goes down with it. Optionally give it somewhere to shout:
+
+```sql
+update public.app_config
+set alert_webhook_url = 'https://hooks.slack.com/services/…'
+where id = 1;
+```
+
+With that unset the monitor still fails its own execution when delivery is
+degraded, which puts the outage in n8n's execution list either way.
+
+Activate the drain. **Nothing is delivered until that workflow is running** — it is the
 only thing that calls `/api/drain`, so without it no lead reaches Meta or
 Airtable, and no error is raised anywhere. That is the failure mode
 `PRODUCTION.md` argues for a dead-man's switch against.

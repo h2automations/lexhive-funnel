@@ -66,7 +66,25 @@ Supabase Auth with an email allowlist, or Vercel's built-in password protection
 as a stopgap. The `delivery.replayed` event already records that a replay
 happened; with real auth it can record *who*.
 
-### 3. A dead-man's switch on the drain
+### 3. A dead-man's switch on the drain — BUILT, after it bit us
+
+This section was written as a prediction. It then happened, exactly as
+described, and went unnoticed for a day: the n8n Schedule resolved
+`{{ $env.PUBLIC_BASE_URL }}` to the literal string
+`[ERROR: access to env vars denied]` and POSTed to that every sixty seconds.
+Nothing errored, `/ops` looked fine, and leads only reached Airtable because
+`/api/lead` drains inline before responding. What follows is what is now built,
+kept in the words it was predicted in.
+
+`/api/drain` stamps `app_config.drain_last_ok_at` on every successful run;
+`/api/health` reads it alongside the oldest waiting row and the dead-letter
+count and answers 200 or 503; `n8n/lexhive-delivery-monitor.json` polls that
+every five minutes, posts to `app_config.alert_webhook_url`, and fails its own
+execution so the alert survives a webhook nobody configured. The thresholds and
+the verdict are pure functions in `api/_lib/health.ts`, tested in
+`health.test.ts` — including the case liveness alone cannot see.
+
+**The original note, unchanged:**
 
 **The most likely silent failure in the whole system.** Delivery is triggered
 by an n8n Schedule. If that workflow is deactivated, its credentials expire, or

@@ -371,6 +371,16 @@ create table if not exists public.app_config (
   updated_at      timestamptz not null default now()
 );
 
+-- The dead-man's switch. /api/drain stamps drain_last_ok_at on every
+-- successful run, including empty ones, so that the ABSENCE of a recent
+-- timestamp is the signal. A stopped drain raises no error anywhere — this
+-- column is the only thing that can tell you it stopped.
+--
+-- alter, not just the create above, because the table already exists in any
+-- environment seeded before this was added.
+alter table public.app_config add column if not exists drain_last_ok_at  timestamptz;
+alter table public.app_config add column if not exists alert_webhook_url text;
+
 -- Guards against the two ways this row goes wrong without anyone noticing.
 --
 -- A trailing slash on the base URL builds "https://host//api/drain". A drain
@@ -421,3 +431,10 @@ create policy "service only" on public.app_config
 -- file is in the repository. Copy supabase/seed-app-config.example.sql, fill
 -- in the value from Vercel, and run that once. supabase/verify.sql reports
 -- whether it took.
+
+-- alert_webhook_url is optional and nullable: with it unset the delivery
+-- monitor still runs and still fails its own execution when delivery is
+-- degraded, it just cannot page anyone. Any Slack-style incoming webhook works.
+--
+--   update public.app_config set alert_webhook_url = 'https://hooks.slack.com/…'
+--   where id = 1;

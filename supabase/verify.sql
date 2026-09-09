@@ -100,6 +100,23 @@ with results (ord, check_name, status, detail) as (
          (count(*) filter (where status in ('pending', 'failed')))::text || ' waiting, ' ||
          (count(*) filter (where status = 'dead'))::text || ' dead'
   from public.delivery_outbox
+
+  union all
+  -- The dead-man's switch itself. /api/drain stamps this on every successful
+  -- run including empty ones, so a stale value means the scheduler stopped
+  -- calling — the failure that raises no error anywhere else.
+  select 10, 'drain heartbeat',
+         case
+           when max(drain_last_ok_at) is null then 'NEVER RUN'
+           when max(drain_last_ok_at) < now() - interval '5 minutes' then 'STALE'
+           else 'ok'
+         end,
+         coalesce(
+           'last ok ' ||
+             round(extract(epoch from (now() - max(drain_last_ok_at))))::text || 's ago',
+           'the drain has never completed a run — /api/health reports degraded'
+         )
+  from public.app_config
 )
 select check_name, status, detail
 from results

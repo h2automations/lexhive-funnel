@@ -209,6 +209,31 @@ async function deliverN8n(row: OutboxRow): Promise<DeliveryResult> {
   };
 }
 
+/**
+ * Stamp the heartbeat that /api/health watches.
+ *
+ * Written on every successful run, including empty ones, because the signal is
+ * its ABSENCE. A drain that stops raises no error anywhere — n8n simply stops
+ * calling, `/ops` still looks fine, and the funnel keeps taking leads that go
+ * nowhere. This one column is what turns that into something a monitor can
+ * see.
+ *
+ * Never allowed to fail the drain: a heartbeat write that throws must not stop
+ * deliveries that already succeeded. A missed stamp degrades health, which is
+ * the correct and conservative direction to be wrong in.
+ */
+async function markDrainAlive(log: Logger): Promise<void> {
+  try {
+    const { error } = await supabase
+      .from('app_config')
+      .update({ drain_last_ok_at: new Date().toISOString() })
+      .eq('id', 1);
+    if (error) throw error;
+  } catch (err) {
+    log.warn('drain.heartbeat_failed', { error: (err as Error)?.message ?? String(err) });
+  }
+}
+
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   const log = createLogger({ headers: req.headers, context: { route: 'drain' } });
   const events: EventRecorder = createEventRecorder(supabase, log);
@@ -237,6 +262,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // for more than a few minutes means n8n has stopped calling us, which is
     // otherwise a completely silent failure — no errors, no alerts, and no
     // leads reaching Airtable.
+    await markDrainAlive(log);
     log.info('drain.completed', { processed: 0, duration_ms: log.elapsed() });
     return res.status(200).json({ processed: 0, requestId: log.requestId });
   }
@@ -384,6 +410,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       detail: { next_attempt_at: nextAttemptAt.toISOString() },
     });
   }
+
+  await markDrainAlive(log);
 
   log.info('drain.completed', {
     processed: claimed.length,
