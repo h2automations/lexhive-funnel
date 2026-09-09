@@ -1,4 +1,20 @@
 import { expect, test, type ConsoleMessage, type Page } from '@playwright/test';
+import {
+  APP_HOST,
+  FUNNEL_PATH,
+  Q,
+  QUESTION_SCREENS,
+  UUID_RE,
+  VARIANT,
+  answerQuestion,
+  eventsNamed,
+  fillContact,
+  makeContact,
+  readDataLayer,
+  waitForCompleteResponse,
+  waitForFunnelReady,
+  type Contact,
+} from './support/funnel';
 
 /**
  * End-to-end tests for the deployed LexHive funnel.
@@ -30,79 +46,9 @@ import { expect, test, type ConsoleMessage, type Page } from '@playwright/test';
  *     when the funnel degrades silently around it.
  */
 
-const APP_BASE = (process.env.BASE_URL || 'https://lexhive.vercel.app').replace(/\/+$/, '');
-const APP_HOST = new URL(APP_BASE).host;
-const RUN_TAG = String(Date.now());
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-const Q = {
-  age: 'Are you between 18 and 64 years old?',
-  gender: 'What is your gender?',
-  state: 'Which state do you live in?',
-  work: 'Are you unable to work because of a medical condition?',
-  duration: 'Has this condition lasted, or is it expected to last, 12 months or longer?',
-  doctor: 'Are you currently under a doctor’s care for this condition?',
-  months: 'Have you worked 20+ years (roughly 40 quarters) in your working life?',
-} as const;
-
-/** The seven question screens in funnel order. */
-const QUESTION_SCREENS: { heading: string }[] = [
-  { heading: Q.age },
-  { heading: Q.gender },
-  { heading: Q.state },
-  { heading: Q.work },
-  { heading: Q.duration },
-  { heading: Q.doctor },
-  { heading: Q.months },
-];
-
 // ---------------------------------------------------------------------------
-// Test data
+// dataLayer assertions
 // ---------------------------------------------------------------------------
-
-interface Contact {
-  firstName: string;
-  lastName: string;
-  email: string;
-  phone: string;
-  zip: string;
-}
-
-/**
- * Email is generated per run unless E2E_EMAIL is set; phone is a fictional US
- * number from the reserved 555-01xx exchange ("clearly fictional" per the
- * task) unless E2E_PHONE is set.
- */
-function makeContact(tag: string): Contact {
-  return {
-    firstName: process.env.E2E_FIRST_NAME || 'Playwright',
-    lastName: process.env.E2E_LAST_NAME || 'Test',
-    email: process.env.E2E_EMAIL || `playwright+${RUN_TAG}-${tag}@example.com`,
-    phone: process.env.E2E_PHONE || '5550100100',
-    zip: process.env.E2E_ZIP || '78701',
-  };
-}
-
-// ---------------------------------------------------------------------------
-// dataLayer helpers
-// ---------------------------------------------------------------------------
-
-async function waitForFunnelReady(page: Page): Promise<void> {
-  await page.waitForFunction(() => {
-    const dl = (window as unknown as { dataLayer?: unknown[] }).dataLayer ?? [];
-    return dl.some((e) => e && (e as { event?: string }).event === 'funnel_ready');
-  });
-}
-
-async function readDataLayer(page: Page): Promise<unknown[]> {
-  return page.evaluate(() => (window as unknown as { dataLayer?: unknown[] }).dataLayer ?? []);
-}
-
-function eventsNamed(dl: unknown[], event: string): Array<{ [k: string]: unknown }> {
-  return dl.filter((e) => e && (e as { event?: string }).event === event) as Array<{
-    [k: string]: unknown;
-  }>;
-}
 
 function assertExactlyOne(events: Array<{ [k: string]: unknown }>, name: string): { [k: string]: unknown } {
   expect(events, `expected exactly one ${name} event in dataLayer`).toHaveLength(1);
@@ -228,29 +174,8 @@ function assertObserversClean(obs: Observer): void {
 }
 
 // ---------------------------------------------------------------------------
-// Funnel-driving helpers
+// Request waiters
 // ---------------------------------------------------------------------------
-
-async function answerQuestion(page: Page, option: string, nextHeading: string): Promise<void> {
-  await page.getByRole('button', { name: option, exact: true }).click();
-  await expect(page.getByRole('heading', { level: 1 })).toHaveText(nextHeading);
-}
-
-function isComplete(res: { request(): { method(): string; postDataJSON(): { status?: string } | null } }) {
-  return res.request().method() === 'POST' && res.request().postDataJSON()?.status === 'complete';
-}
-
-/** The completion response: the one POST /api/lead with status 'complete'. */
-function waitForCompleteResponse(page: Page) {
-  return page.waitForResponse(async (res) => {
-    if (res.request().method() !== 'POST' || !res.url().includes('/api/lead')) return false;
-    try {
-      return isComplete(res);
-    } catch {
-      return false;
-    }
-  });
-}
 
 /** The completion request itself, so its body can be shape-checked. */
 function waitForCompleteRequest(page: Page) {
@@ -286,16 +211,6 @@ function waitForStatePartial(page: Page, stateValue: string) {
   });
 }
 
-async function fillContact(page: Page, contact: Contact): Promise<void> {
-  // exact: the consent checkbox's label contains "email" and "phone", so a
-  // substring match would resolve to two elements.
-  await page.getByLabel('First name', { exact: true }).fill(contact.firstName);
-  await page.getByLabel('Last name', { exact: true }).fill(contact.lastName);
-  await page.getByLabel('Email', { exact: true }).fill(contact.email);
-  await page.getByLabel('Phone', { exact: true }).fill(contact.phone);
-  await page.getByLabel('ZIP code', { exact: true }).fill(contact.zip);
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -304,7 +219,7 @@ test('1 — qualification funnel loads without leaking to the dataLayer', async 
   const obs = attachObserver(page);
   const contact = makeContact('t1');
 
-  await page.goto('/qualification-v1');
+  await page.goto(FUNNEL_PATH);
   await waitForFunnelReady(page);
 
   await expect(page.getByRole('heading', { level: 1 })).toHaveText(Q.age);
@@ -312,7 +227,7 @@ test('1 — qualification funnel loads without leaking to the dataLayer', async 
 
   const dl = await readDataLayer(page);
   const ready = assertExactlyOne(eventsNamed(dl, 'funnel_ready'), 'funnel_ready');
-  expect(ready.variant).toBe('qualification-v1');
+  expect(ready.variant).toBe(VARIANT);
   expect(typeof ready.external_id).toBe('string');
   expect(ready.external_id).toBeTruthy();
   assertDataLayerClean(dl, contact);
@@ -324,7 +239,7 @@ test('2 — qualified Texas submission', async ({ page }) => {
   const obs = attachObserver(page);
   const contact = makeContact('tx');
 
-  await page.goto('/qualification-v1');
+  await page.goto(FUNNEL_PATH);
   await waitForFunnelReady(page);
   await expect(page.getByRole('heading', { level: 1 })).toHaveText(Q.age);
 
@@ -360,7 +275,7 @@ test('2 — qualified Texas submission', async ({ page }) => {
   const steps = eventsNamed(dl, 'funnel_step');
   expect(steps).toHaveLength(7);
   expect(steps.map((s) => s.step_number).sort((a, b) => Number(a) - Number(b))).toEqual([1, 2, 3, 4, 5, 6, 7]);
-  expect(steps.every((s) => s.variant === 'qualification-v1')).toBe(true);
+  expect(steps.every((s) => s.variant === VARIANT)).toBe(true);
 
   const submitted = assertExactlyOne(eventsNamed(dl, 'application_submitted'), 'application_submitted');
   expect(submitted.event_id).toBe(result.eventId);
@@ -375,7 +290,7 @@ test('3 — disqualified submission fires no optimization event', async ({ page 
   const obs = attachObserver(page);
   const contact = makeContact('dq');
 
-  await page.goto('/qualification-v1');
+  await page.goto(FUNNEL_PATH);
   await waitForFunnelReady(page);
   await expect(page.getByRole('heading', { level: 1 })).toHaveText(Q.age);
 
@@ -417,7 +332,7 @@ test('4 — restricted New York flow collects no contact details', async ({ page
   const obs = attachObserver(page);
   const contact = makeContact('ny');
 
-  await page.goto('/qualification-v1');
+  await page.goto(FUNNEL_PATH);
   await waitForFunnelReady(page);
   await expect(page.getByRole('heading', { level: 1 })).toHaveText(Q.age);
 
@@ -543,7 +458,7 @@ test('6 — every screen is accessible and the submit holds', async ({ page }) =
     await expect(bar).toHaveAttribute('aria-valuenow', /\d{1,3}/);
   };
 
-  await page.goto('/qualification-v1');
+  await page.goto(FUNNEL_PATH);
   await waitForFunnelReady(page);
   await expectHeading(Q.age);
 
