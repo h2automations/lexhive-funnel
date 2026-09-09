@@ -94,7 +94,8 @@ URL made of that error text and fails on every schedule tick.
    RLS is on with no policy granted, so only the service role can read it.
 
 2. In n8n, create a **Supabase** credential named
-   `LexHive Supabase (service role)` — host `https://<project>.supabase.co`,
+   `LexHive Supabase (service role)` — host
+   `https://nmfjwytnwxsspigjlwgr.supabase.co`,
    service-role key. That credential is the only secret involved, and it lives
    in n8n's encrypted credential store, which is where a secret belongs.
 

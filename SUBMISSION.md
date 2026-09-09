@@ -1,7 +1,7 @@
 # LexHive take-home — notes
 
 **Funnel** https://lexhive.vercel.app/qualification-v1 · **Ops** https://lexhive.vercel.app/ops
-**Repo** _<github url>_ · **Automation** `n8n/*.json` · **Tags** `gtm/*.json` · **Database** _<Airtable link>_
+**Repo** _<github url>_ · **Automation** `n8n/*.json` · **Tags** `gtm/*.json` · **Database** https://airtable.com/appGH8RYEydLFlyNA
 
 ## The decision everything follows from
 
