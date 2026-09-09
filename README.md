@@ -62,18 +62,26 @@ moment Postgres commits.** Meta and Airtable are deliveries, not dependencies.
 
 ## Tracking quality
 
-**Pixel initialisation.** The page uses Meta's canonical `fbq` stub, which is
-load-bearing rather than boilerplate: `fbevents.js` replays whatever is sitting
-in `fbq.queue` when it finishes loading. A stub without that array accepts every
-call and drops it, so `init`, `PageView` and `Lead` all disappear and the
-dataset reports no activity while the pixel ID is provably present in the HTML.
+**Tag management.** Every browser tag — Meta Pixel, GA4, Microsoft Clarity —
+is configured in GTM container `GTM-P34XGVL3`. The app pushes three events to
+the dataLayer (`src/lib/datalayer.ts`) and the container decides who hears about
+them, so adding a vendor is a container change rather than a deploy. The
+container export lives in `gtm/`, for the same reason the n8n workflows do:
+configuration that exists only in someone's account is configuration nobody can
+review. `docs/gtm-setup.md` has the tag-by-tag build.
 
 **Deduplication.** `/api/lead` generates the `event_id`, stores it on the lead
-row, and returns it. The browser fires `fbq('track','Lead',{},{eventID})` with
+row, and returns it. The browser fires the Pixel's `Lead` event with
 that exact value while the drain worker sends the same one to the Conversions
 API. Making the server the source of truth means a mismatch is structurally
 impossible rather than merely unlikely — the common pattern of minting the ID
 client-side and hoping the server echoes it breaks silently on any retry.
+
+With tags in GTM the browser half of that is a field: the Meta Pixel tag's
+**Event ID** must map to `{{DLV - event_id}}`. Unmapped, nothing looks wrong —
+no error, a green tick in Preview — and every conversion is counted twice. That
+is the real cost of moving tags into a container, and it is why the mapping is
+the first thing `docs/gtm-setup.md` verifies.
 
 **Identifiers sent.** `em`, `ph`, `fn`, `ln`, `st`, `zp`, `country`, and
 `external_id`, each normalized before hashing; `client_ip_address`,
@@ -107,20 +115,15 @@ unrecognised names.
 matching and sent hashed in `user_data`. It survives cookie loss mid-funnel and
 costs nothing.
 
-**GA4 and Clarity** run alongside the Pixel, both env-driven and both no-ops
-when their id is unset, so preview deployments don't pollute production
-analytics. Neither loads on `/ops` — an internal surface has no business being
-session-recorded.
-
-What they are *not* sent matters more than what they are. The funnel asks
+**What the tags are not given** matters more than what they are. The funnel asks
 whether someone is unable to work because of a medical condition, so the
-analytics events carry the **step reached and never the answer given** —
-`funnel_step` with an index and a question id, never `work=Yes`. The drop-off
-curve is fully visible from that, and no health attribute is attached to a user
-in a third-party property. Contact fields carry `data-clarity-mask` in the
+dataLayer carries the **step ordinal and nothing else** — never the answer, and
+never the question's semantic id, since a variable reading `question: "doctor"`
+feeds the very classification that got this domain flagged by Meta. The drop-off
+curve is identical either way. Contact fields carry `data-clarity-mask` in the
 markup rather than relying on Clarity's default masking, because a default is
 not a control: it survives someone changing a dashboard setting without knowing
-what the form collects.
+what the form collects. No tag fires on `/ops`.
 
 ---
 
@@ -239,6 +242,7 @@ reporting. Deduplication and match quality behave identically either way.
 | File | What it is |
 |---|---|
 | [`SUBMISSION.md`](./SUBMISSION.md) | The one-page note: assumptions, trade-offs, extras. **Start here.** |
+| [`docs/gtm-setup.md`](./docs/gtm-setup.md) | The GTM container, tag by tag — including the one field the dedup depends on |
 | [`docs/setup-airtable-n8n.md`](./docs/setup-airtable-n8n.md) | Wiring the automation layer, and how to prove it end to end |
 | [`PRODUCTION.md`](./PRODUCTION.md) | What this needs before real ad spend, in priority order |
 | This file | How the system works and why |

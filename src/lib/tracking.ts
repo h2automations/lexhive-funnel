@@ -1,32 +1,20 @@
 /**
- * Client-side Meta Pixel setup plus attribution capture.
+ * Attribution capture.
  *
- * The stub below is Meta's canonical one. That matters: fbevents.js replays
- * whatever is sitting in `fbq.queue` once it loads, so a hand-rolled shim
- * without that array silently discards every call made before the script
- * arrives — which is all of them, including `init` and `PageView`.
+ * Tag loading now lives in GTM (see lib/datalayer.ts) — this file no longer
+ * touches fbq. What it still owns is the part a tag manager cannot do for you:
+ * capturing the click identifiers at the only moment they exist.
  *
  * Attribution is captured on the FIRST pageview and persisted, because the
  * query string (fbclid, utm_*) is gone after the first route change. Cookie
- * identifiers (_fbp, _fbc) are re-read at submit since the Pixel script often
- * writes them only after first paint.
+ * identifiers (_fbp, _fbc) are re-read at submit, since the Pixel — wherever it
+ * is loaded from — usually writes them only after first paint.
+ *
+ * These values go to the SERVER, on the lead row, and from there to the
+ * Conversions API. They are deliberately not pushed to the dataLayer: the
+ * browser Pixel reads its own cookies, and republishing click ids to every tag
+ * in the container buys nothing.
  */
-
-type FbqFn = {
-  (...args: unknown[]): void;
-  callMethod?: (...args: unknown[]) => void;
-  queue: unknown[];
-  push: unknown;
-  loaded: boolean;
-  version: string;
-};
-
-declare global {
-  interface Window {
-    fbq?: FbqFn;
-    _fbq?: FbqFn;
-  }
-}
 
 export interface Attribution {
   fbclid: string | null;
@@ -41,7 +29,6 @@ export interface Attribution {
   firstSeenAt: number;
 }
 
-const PIXEL_ID = import.meta.env.VITE_META_PIXEL_ID as string | undefined;
 const SESSION_KEY = 'lexhive_session_id';
 const FIRST_SEEN_KEY = 'lexhive_first_seen';
 const ATTRIBUTION_KEY = 'lexhive_attribution';
@@ -76,74 +63,6 @@ export function getExternalId(): string {
   return id;
 }
 
-/**
- * Load the Meta Pixel and initialise it with advanced matching.
- *
- * Safe to call twice (React StrictMode double-invokes effects in dev): the
- * `window.fbq` guard makes the second call a no-op.
- */
-export function initPixel(externalId: string): void {
-  if (!PIXEL_ID) {
-    if (import.meta.env.DEV) {
-      console.warn('[lexhive] VITE_META_PIXEL_ID is not set — Pixel disabled.');
-    }
-    return;
-  }
-  if (window.fbq) return;
-
-  const n = function (...args: unknown[]) {
-    if (n.callMethod) {
-      n.callMethod.apply(n, args);
-    } else {
-      n.queue.push(args);
-    }
-  } as unknown as FbqFn;
-
-  n.queue = [];
-  n.push = n;
-  n.loaded = true;
-  n.version = '2.0';
-
-  window.fbq = n;
-  window._fbq = n;
-
-  const s = document.createElement('script');
-  s.async = true;
-  s.src = 'https://connect.facebook.net/en_US/fbevents.js';
-  document.head.appendChild(s);
-
-  // external_id in advanced matching. The Pixel hashes it in the browser and
-  // the server sends SHA-256 of the same value, so the two match.
-  window.fbq('init', PIXEL_ID, { external_id: externalId });
-  window.fbq('track', 'PageView');
-}
-
-/**
- * Track a STANDARD Meta event (Lead, PageView, …), optionally with the
- * server-minted event_id that deduplicates it against the Conversions API.
- */
-export function trackEvent(
-  event: string,
-  data?: Record<string, unknown>,
-  eventId?: string
-): void {
-  if (!window.fbq) return;
-  if (eventId) {
-    window.fbq('track', event, data ?? {}, { eventID: eventId });
-  } else {
-    window.fbq('track', event, data ?? {});
-  }
-}
-
-/**
- * Track a CUSTOM event. Funnel step names are not standard events — sending
- * them through `track` makes Meta drop them as unrecognised.
- */
-export function trackCustom(event: string, data?: Record<string, unknown>): void {
-  if (!window.fbq) return;
-  window.fbq('trackCustom', event, data ?? {});
-}
-
 function readFirstSeenAt(): number {
   const existing = safeGet(FIRST_SEEN_KEY);
   if (existing && Number(existing) > 0) return Number(existing);
@@ -172,7 +91,7 @@ export function reconstructFbc():
  * The second segment of `_fbc` is the subdomain index of the host the cookie
  * is written on — "com" is 0, "example.com" is 1, "lexhive.vercel.app" is 2.
  * Hardcoding 1 produces a value that disagrees with the cookie Meta writes on
- * any host with a different depth, which is exactly the sort of near-miss that
+ * any host of a different depth, which is exactly the sort of near-miss that
  * costs match quality without ever raising an error.
  */
 function subdomainIndex(): number {

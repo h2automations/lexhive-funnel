@@ -90,9 +90,11 @@ async function deliverMeta(row: OutboxRow): Promise<DeliveryResult> {
 
   return sendMetaEvent({
     accessToken: process.env.META_CAPI_ACCESS_TOKEN ?? '',
-    // Server-side name first. VITE_ variables are browser variables; relying on
-    // one here only worked because it happened to be set on Vercel too.
-    pixelId: process.env.META_PIXEL_ID || process.env.VITE_META_PIXEL_ID || '',
+    // The browser Pixel now gets its id from the GTM container, so the server
+    // owns this one outright. The VITE_ fallback that used to be here was a
+    // trap: it made the server quietly depend on a browser variable, and it
+    // would have kept working right up until someone tidied that variable away.
+    pixelId: process.env.META_PIXEL_ID || '',
     apiVersion: process.env.META_API_VERSION || 'v21.0',
     eventName: (row.payload.event_name as string) || 'Lead',
     eventId: (row.payload.event_id as string) || lead.event_id,

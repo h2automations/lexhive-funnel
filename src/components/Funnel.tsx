@@ -1,14 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import {
-  initPixel,
-  getExternalId,
-  getAttribution,
-  refreshCookies,
-  trackEvent,
-  trackCustom,
-} from '../lib/tracking';
+import { getExternalId, getAttribution, refreshCookies } from '../lib/tracking';
 import { STATES, type Option } from '../lib/states';
-import { initAnalytics, trackGaEvent, tagClarity } from '../lib/analytics';
+import { funnelReady, funnelStep, leadSubmitted } from '../lib/datalayer';
 
 /**
  * Social Security disability qualification funnel.
@@ -109,8 +102,8 @@ export default function Funnel({ variant }: { variant: string }) {
   const restricted = disposition === 'restricted';
 
   useEffect(() => {
-    initPixel(externalId);
-    initAnalytics({ variant });
+    // Tags are configured in GTM; the app only announces what happened.
+    funnelReady({ variant, externalId });
     getAttribution();
   }, [externalId, variant]);
 
@@ -164,23 +157,12 @@ export default function Funnel({ variant }: { variant: string }) {
     void persistPartial(next);
 
     // Ad and analytics platforms get the step ORDINAL only — never the answer,
-    // and never the question's semantic id.
-    //
-    // Both halves of that matter. The answer is obviously health data. But the
-    // id is too: a parameter reading `question: "doctor"` on a page about
-    // disability tells Meta's classifier that this event is about a
-    // provider/patient relationship, which is precisely the signal that gets a
-    // domain blocked under the Business Tool Terms. Ordinals carry the same
-    // drop-off information and assert nothing about anyone's health.
-    //
-    // The semantic ids are still recorded — in our own `app_events` table,
-    // which is our database rather than an ad platform's.
-    trackCustom('FunnelStep', { step: step + 1, variant });
-
-    trackGaEvent('funnel_step', {
-      step_number: step + 1,
-      variant,
-    });
+    // and never the question's semantic id. Both halves matter: the answer is
+    // health data, and a variable reading `question: "doctor"` on a disability
+    // questionnaire is itself a contribution to the Business Tool Terms
+    // classification that got this domain flagged. The ordinal gives the same
+    // drop-off curve. Semantic ids stay in `app_events`, which is our database.
+    funnelStep({ stepNumber: step + 1, variant });
 
     setStep(step + 1);
   }
@@ -233,26 +215,14 @@ export default function Funnel({ variant }: { variant: string }) {
       leadIdRef.current = data.leadId;
       if (data.disposition) setDisposition(data.disposition);
 
-      // The Lead event carries the server-minted event_id, so the browser
-      // event and the Conversions API event deduplicate into one.
-      trackEvent(
-        'Lead',
-        {
-          content_name: variant,
-          content_category: data.disposition,
-        },
-        data.eventId
-      );
-
-      // GA4's recommended event name for this, so it works with the built-in
-      // reports instead of needing a custom conversion definition.
-      trackGaEvent('generate_lead', {
+      // The conversion. `event_id` is the id the server minted and will send
+      // to the Conversions API; the Meta Pixel tag in GTM maps it to Event ID
+      // so the two collapse into one conversion. See docs/gtm-setup.md.
+      leadSubmitted({
+        eventId: data.eventId,
         variant,
         disposition: data.disposition,
-        // No value: a lead's worth depends on the buyer, and inventing a
-        // number here would quietly corrupt every ROAS report built on it.
       });
-      tagClarity('disposition', String(data.disposition));
 
       setStatus('done');
       setStep(STEPS);

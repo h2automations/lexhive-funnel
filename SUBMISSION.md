@@ -1,7 +1,7 @@
 # LexHive take-home — notes
 
 **Funnel** https://lexhive.vercel.app/qualification-v1 · **Ops** https://lexhive.vercel.app/ops
-**Repo** _<github url>_ · **Automation** `n8n/*.json` · **Database** _<Airtable link>_
+**Repo** _<github url>_ · **Automation** `n8n/*.json` · **Tags** `gtm/*.json` · **Database** _<Airtable link>_
 
 ## The decision everything follows from
 
@@ -28,6 +28,14 @@ stores it and returns it; the browser fires `fbq('track','Lead',…,{eventID})`
 with that exact value and the drain sends the same one to the CAPI. The common
 pattern — minting client-side and hoping the server echoes it — breaks silently
 on any retry. This way a mismatch is structurally impossible.
+
+**All browser tags live in GTM**, not in the code. The app publishes three
+dataLayer events and the container fires Meta, GA4 and Clarity from them, so a
+new vendor is a container change rather than a deploy. The trade is real and
+worth naming: the dedup now depends on the Pixel tag's Event ID field being
+mapped to `{{DLV - event_id}}`, and if it isn't, nothing errors and every
+conversion is counted twice. The container export is committed alongside the
+n8n workflows so that field is reviewable.
 
 **No city is sent to Meta.** The funnel doesn't collect one. Filling `ct` with
 the state to have something there costs match quality rather than adding it. I
