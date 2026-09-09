@@ -134,7 +134,9 @@ reports rather than needing a custom conversion. **Send no `value`** — a lead'
 worth depends on the buyer, and an invented number quietly corrupts every ROAS
 report built on it.
 
-## 5. Microsoft Clarity
+## 5. Microsoft Clarity — *not currently installed*
+
+Set up and later removed; kept here so it can be reintroduced without rework.
 
 Custom HTML tag with the Clarity snippet for project `yfgq1rnly4`, on
 Initialization – All Pages.

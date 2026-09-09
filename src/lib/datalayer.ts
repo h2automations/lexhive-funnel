@@ -1,7 +1,7 @@
 /**
  * The dataLayer contract.
  *
- * Every tag — Meta Pixel, GA4, Clarity — is configured in GTM container
+ * Every tag — Meta Pixel, GA4 — is configured in GTM container
  * GTM-P34XGVL3. This file is the entire interface between the application and
  * the marketing stack: the app describes what happened, GTM decides who hears
  * about it. Adding a vendor becomes a container change rather than a deploy,

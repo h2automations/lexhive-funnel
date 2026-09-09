@@ -35,7 +35,7 @@ echoes it breaks silently on any retry — this way a mismatch is structurally
 impossible.
 
 **All browser tags live in GTM**, not in the code. The app publishes three
-dataLayer events and the container fires Meta, GA4 and Clarity from them, so a
+dataLayer events and the container fires Meta and GA4 from them, so a
 new vendor is a container change rather than a deploy. The trade: dedup now depends on the Pixel tag's Event ID field being
 mapped to `{{DLV - event_id}}`, and if it isn't, nothing errors and every
 conversion is counted twice. The container export belongs in `gtm/` alongside the
@@ -61,7 +61,8 @@ constraint in this vertical. So browser events carry a step **ordinal** and
 nothing more: not the answer, and not the question's semantic id, since
 `question: "doctor"` feeds that classification itself. Same drop-off curve.
 Semantic ids stay in `app_events`, our database rather than an ad platform's,
-and contact fields are masked out of Clarity in the markup.
+and the contact form carries `data-clarity-mask` so any session recorder is
+masked at the markup rather than by a dashboard setting.
 
 **Restriction is decided server-side.** The browser is told its disposition; it
 never decides. A compliance rule enforced in client code is a compliance rule

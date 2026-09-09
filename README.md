@@ -71,7 +71,7 @@ moment Postgres commits.** Meta and Airtable are deliveries, not dependencies.
 
 ## Tracking quality
 
-**Tag management.** Every browser tag — Meta Pixel, GA4, Microsoft Clarity —
+**Tag management.** Every browser tag — Meta Pixel, GA4 —
 is configured in GTM container `GTM-P34XGVL3`. The app pushes four events to
 the dataLayer (`src/lib/datalayer.ts`) and the container decides who hears about
 them, so adding a vendor is a container change rather than a deploy. The
