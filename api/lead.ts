@@ -17,6 +17,7 @@ import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { createLogger, type Logger } from './_lib/log.js';
 import { reportError } from './_lib/sentry.js';
 import { createEventRecorder } from './_lib/events.js';
+import { stateCodeFrom, classify, type Answers } from './_lib/qualification.js';
 
 const supabase = createClient(
   process.env.SUPABASE_URL!,
@@ -118,7 +119,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     : 'qualification-v1';
 
   const isComplete = body.status === 'complete';
-  const answers = (body.answers ?? {}) as Record<string, { q?: string; a?: string; label?: string }>;
+  const answers = (body.answers ?? {}) as Answers;
 
   if (typeof answers !== 'object' || Array.isArray(answers)) {
     log.warn('lead.rejected', { reason: 'invalid_answers' });
@@ -129,16 +130,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return res.status(413).json({ error: 'answers_too_large' });
   }
 
-  const stateCode = (answers.state?.a ?? '').toUpperCase().slice(0, 2);
-  const restricted = await isRestricted(stateCode, log);
-
-  // Any "No" to a knockout question disqualifies — age included, which the
-  // previous version asked and then ignored.
-  const disqualified = ['age', 'work', 'duration', 'doctor', 'months'].some(
-    (id) => answers[id]?.a === 'No'
-  );
-
-  const disposition = restricted ? 'restricted' : disqualified ? 'disqualified' : 'qualified';
+  // Resolved rather than truncated: `"New York".slice(0, 2)` is `"NE"`, and
+  // Nebraska is unrestricted. See _lib/qualification.ts.
+  const stateCode = stateCodeFrom(answers);
+  const restricted = await isRestricted(stateCode ?? '', log);
+  const disposition = classify({ answers, restricted });
 
   const contact = (body.contact ?? {}) as Record<string, unknown>;
   const email = truncate(contact.email, 320);

@@ -219,6 +219,17 @@ reporting. Deduplication and match quality behave identically either way.
 
 ---
 
+## Documentation map
+
+| File | What it is |
+|---|---|
+| [`SUBMISSION.md`](./SUBMISSION.md) | The one-page note: assumptions, trade-offs, extras. **Start here.** |
+| [`docs/setup-airtable-n8n.md`](./docs/setup-airtable-n8n.md) | Wiring the automation layer, and how to prove it end to end |
+| [`PRODUCTION.md`](./PRODUCTION.md) | What this needs before real ad spend, in priority order |
+| This file | How the system works and why |
+
+---
+
 ## Observability
 
 Three layers, because they answer different questions: structured JSON logs to a
