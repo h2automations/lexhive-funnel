@@ -44,6 +44,16 @@ That's an A/B test, not an assumption, and the variant plumbing is already
 there — the variant is read from the URL path and lands on every lead row and
 every Meta event.
 
+**Health signals are kept out of the ad platforms.** Meta flagged this domain
+under its Business Tool Terms as *"associated with medical conditions"* — the
+real constraint in this vertical, and one the funnel's own questions provoke.
+So the browser events carry a step **ordinal** and nothing more: never the
+answer, and never the question's semantic id, because `question: "doctor"` is
+itself a contribution to that classification. The ordinals give the same
+drop-off curve; the semantic ids live in our `app_events` table, which is our
+database rather than an ad platform's. Contact fields are masked out of Clarity
+in the markup rather than by dashboard setting.
+
 **Restriction is decided server-side.** The browser is told its disposition; it
 never decides. A compliance rule enforced in client code is a compliance rule
 one devtools console away from being ignored.

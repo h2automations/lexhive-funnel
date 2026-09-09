@@ -163,16 +163,22 @@ export default function Funnel({ variant }: { variant: string }) {
     // truthful drop-off number for the final question.
     void persistPartial(next);
 
-    // Funnel steps are custom events; `track` would have Meta discard them.
-    trackCustom('FunnelStep', { step: step + 1, question: question.id, variant });
+    // Ad and analytics platforms get the step ORDINAL only — never the answer,
+    // and never the question's semantic id.
+    //
+    // Both halves of that matter. The answer is obviously health data. But the
+    // id is too: a parameter reading `question: "doctor"` on a page about
+    // disability tells Meta's classifier that this event is about a
+    // provider/patient relationship, which is precisely the signal that gets a
+    // domain blocked under the Business Tool Terms. Ordinals carry the same
+    // drop-off information and assert nothing about anyone's health.
+    //
+    // The semantic ids are still recorded — in our own `app_events` table,
+    // which is our database rather than an ad platform's.
+    trackCustom('FunnelStep', { step: step + 1, variant });
 
-    // The step reached, never the answer given. Several of these questions are
-    // about a medical condition, and a health attribute does not belong in a
-    // third-party analytics property — see lib/analytics.ts. The drop-off curve
-    // is fully visible without it.
     trackGaEvent('funnel_step', {
       step_number: step + 1,
-      step_id: question.id,
       variant,
     });
 

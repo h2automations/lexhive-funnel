@@ -12,12 +12,17 @@
  * condition, whether it has lasted twelve months, and whether they are under a
  * doctor's care. Those answers are health data.
  *
- * So the analytics events carry the *step reached* and never the *answer
- * given*: `funnel_step` with a question id and an index, never `work=Yes`. The
- * drop-off curve — which is the thing anyone actually optimises against — is
- * fully visible from that, and no health attribute is attached to a user in a
- * third-party analytics property. Google's own policies prohibit sending health
- * information to Analytics, and the useful reporting does not require it.
+ * So the analytics events carry the *step ordinal* and nothing else: a step
+ * number, never `work=Yes`, and never even the question's semantic id. That
+ * second exclusion is not fussiness — Meta flagged this exact domain under its
+ * Business Tool Terms for looking "associated with medical conditions", and a
+ * parameter reading `question: "doctor"` is a direct contribution to that
+ * classification. Google's policies prohibit health data in Analytics on the
+ * same grounds.
+ *
+ * Ordinals carry the same drop-off information, which is the thing anyone
+ * actually optimises against. The semantic ids are still recorded in our own
+ * `app_events` table, where they are our data rather than an ad platform's.
  *
  * Contact fields are masked from Clarity in the markup (`data-clarity-mask`),
  * and I would additionally set Clarity's masking mode to Strict in the
