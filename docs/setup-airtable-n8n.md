@@ -77,8 +77,10 @@ enabled, so `{{ $env.PUBLIC_BASE_URL }}` inside a node resolves to the string
 `[ERROR: access to env vars denied]` — the node does not throw, it POSTs to a
 URL made of that error text and fails on every schedule tick.
 
-1. Run the `app_config` block at the bottom of `supabase/schema.sql`, then seed
-   the single row:
+1. Run `supabase/schema.sql`, then seed the single config row from
+   `supabase/seed-app-config.example.sql` (copy it to
+   `supabase/seed-app-config.sql`, which is gitignored, and fill in the
+   secret). `supabase/verify.sql` confirms it took. In full:
 
    ```sql
    insert into public.app_config (id, public_base_url, drain_secret)

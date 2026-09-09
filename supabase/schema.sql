@@ -371,6 +371,44 @@ create table if not exists public.app_config (
   updated_at      timestamptz not null default now()
 );
 
+-- Guards against the two ways this row goes wrong without anyone noticing.
+--
+-- A trailing slash on the base URL builds "https://host//api/drain". A drain
+-- secret with a stray space fails timingSafeEqual and comes back as a 401 that
+-- looks exactly like a rotated secret nobody updated. Neither surfaces as an
+-- error anywhere; both are only visible in the drain logs, if someone reads
+-- them. Rejecting them at write time turns a silent misconfiguration into a
+-- failure at the moment it is made.
+--
+-- Added through DO blocks because `create table if not exists` will not add a
+-- constraint to a table that already exists, and this file has to stay safe to
+-- re-run against a live database.
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+    where conrelid = 'public.app_config'::regclass
+      and conname  = 'app_config_base_url_shape'
+  ) then
+    alter table public.app_config add constraint app_config_base_url_shape
+      check (public_base_url ~ '^https?://[^/]+$');
+  end if;
+
+  if not exists (
+    select 1 from pg_constraint
+    where conrelid = 'public.app_config'::regclass
+      and conname  = 'app_config_drain_secret_usable'
+  ) then
+    alter table public.app_config add constraint app_config_drain_secret_usable
+      check (
+        drain_secret = btrim(drain_secret)
+        and length(drain_secret) > 0
+        and lower(drain_secret) not in
+          ('change-me', 'changeme', 'replace-me', 'replace_me', 'todo', 'secret')
+      );
+  end if;
+end $$;
+
 alter table public.app_config enable row level security;
 
 -- No policy is granted, so anon and authenticated see nothing at all. Only the
@@ -379,11 +417,7 @@ drop policy if exists "service only" on public.app_config;
 create policy "service only" on public.app_config
   for all using (false) with check (false);
 
--- Seed it once, with the real values:
---
---   insert into public.app_config (id, public_base_url, drain_secret)
---   values (1, 'https://lexhive.vercel.app', '<the same DRAIN_SECRET set in Vercel>')
---   on conflict (id) do update
---     set public_base_url = excluded.public_base_url,
---         drain_secret    = excluded.drain_secret,
---         updated_at      = now();
+-- The row itself is deliberately NOT seeded here: it holds a secret and this
+-- file is in the repository. Copy supabase/seed-app-config.example.sql, fill
+-- in the value from Vercel, and run that once. supabase/verify.sql reports
+-- whether it took.

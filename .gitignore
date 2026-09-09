@@ -10,3 +10,7 @@ dist
 .test-build
 playwright-report
 test-results
+supabase/seed-app-config.sql
+.locktrash/
+.lt/
+Claude outputs/
