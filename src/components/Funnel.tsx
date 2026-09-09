@@ -8,6 +8,7 @@ import {
   trackCustom,
 } from '../lib/tracking';
 import { STATES, type Option } from '../lib/states';
+import { initAnalytics, trackGaEvent, tagClarity } from '../lib/analytics';
 
 /**
  * Social Security disability qualification funnel.
@@ -109,8 +110,9 @@ export default function Funnel({ variant }: { variant: string }) {
 
   useEffect(() => {
     initPixel(externalId);
+    initAnalytics({ variant });
     getAttribution();
-  }, [externalId]);
+  }, [externalId, variant]);
 
   // Move focus to each new question so screen readers start on it.
   useEffect(() => {
@@ -163,6 +165,16 @@ export default function Funnel({ variant }: { variant: string }) {
 
     // Funnel steps are custom events; `track` would have Meta discard them.
     trackCustom('FunnelStep', { step: step + 1, question: question.id, variant });
+
+    // The step reached, never the answer given. Several of these questions are
+    // about a medical condition, and a health attribute does not belong in a
+    // third-party analytics property — see lib/analytics.ts. The drop-off curve
+    // is fully visible without it.
+    trackGaEvent('funnel_step', {
+      step_number: step + 1,
+      step_id: question.id,
+      variant,
+    });
 
     setStep(step + 1);
   }
@@ -226,6 +238,16 @@ export default function Funnel({ variant }: { variant: string }) {
         data.eventId
       );
 
+      // GA4's recommended event name for this, so it works with the built-in
+      // reports instead of needing a custom conversion definition.
+      trackGaEvent('generate_lead', {
+        variant,
+        disposition: data.disposition,
+        // No value: a lead's worth depends on the buyer, and inventing a
+        // number here would quietly corrupt every ROAS report built on it.
+      });
+      tagClarity('disposition', String(data.disposition));
+
       setStatus('done');
       setStep(STEPS);
     } catch {
@@ -269,7 +291,15 @@ export default function Funnel({ variant }: { variant: string }) {
           </p>
         )}
 
+        {/*
+          Everything the person types is masked out of Clarity recordings.
+          Clarity masks input values by default, but "by default" is not a
+          control — this is a name, phone number and TCPA consent record, and
+          the mask should be explicit in the markup where it survives a
+          dashboard setting being changed by someone who doesn't know that.
+        */}
         <form
+          data-clarity-mask="true"
           onSubmit={(e) => {
             e.preventDefault();
             void submit();

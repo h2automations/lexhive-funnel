@@ -107,6 +107,21 @@ unrecognised names.
 matching and sent hashed in `user_data`. It survives cookie loss mid-funnel and
 costs nothing.
 
+**GA4 and Clarity** run alongside the Pixel, both env-driven and both no-ops
+when their id is unset, so preview deployments don't pollute production
+analytics. Neither loads on `/ops` — an internal surface has no business being
+session-recorded.
+
+What they are *not* sent matters more than what they are. The funnel asks
+whether someone is unable to work because of a medical condition, so the
+analytics events carry the **step reached and never the answer given** —
+`funnel_step` with an index and a question id, never `work=Yes`. The drop-off
+curve is fully visible from that, and no health attribute is attached to a user
+in a third-party property. Contact fields carry `data-clarity-mask` in the
+markup rather than relying on Clarity's default masking, because a default is
+not a control: it survives someone changing a dashboard setting without knowing
+what the form collects.
+
 ---
 
 ## Reliability
