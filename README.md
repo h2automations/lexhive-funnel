@@ -18,45 +18,31 @@ The build passes (`npm run build`), typechecks clean (`tsc --noEmit`), and both
 
 | Status | Item |
 |---|---|
-| ✅ | Vercel production deployment linked to project `lexhive-funnel` |
-| ✅ | GTM container `GTM-P34XGVL3` installed — Meta Pixel, GA4 and Clarity are configured there, not in code |
-| ✅ | **Supabase configured** — `schema.sql` applied (`state_rules`, outbox, `app_events`, `delivery_metrics`, `reconcile_missing_outbox`) |
-| ✅ | Server-side env vars on Vercel: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `META_PIXEL_ID`, `META_API_VERSION`, `DRAIN_SECRET`, `OPS_KEY`, `PUBLIC_BASE_URL`, `META_CAPI_ACCESS_TOKEN`, `N8N_WEBHOOK_URL`, `N8N_INTERNAL_SECRET`, `AIRTABLE_BASE_ID` |
-| ✅ | 29 unit tests + a Playwright E2E suite — all green against the deployed site |
-| ✅ | **Deliveries happen without the external scheduler** — a fresh qualified
-submission auto-delivers to Meta CAPI and the n8n/Airtable webhook in seconds
-(`/api/lead` runs a bounded drain sweep before responding; verified with a real
-submission — both rows `succeeded`, 0 pending, 0 dead). The sweep even healed a
-previously stuck restricted row. Activating the n8n `LexHive Outbox Drain`
-Schedule is still advised as the retry/backlog backstop |
-| ⬜ | GTM container export committed into `gtm/` (currently just `gtm/README.md`) |
-| ⬜ | Meta Test Events verification (Browser + Server, deduplicated) — server events delivered; the in-Meta deduplication screenshot still needs Events Manager |
+| ✅ | Vercel production deployment |
+| ✅ | GTM container `GTM-P34XGVL3` — Meta Pixel and GA4 configured there, not in code |
+| ✅ | Supabase — `supabase/schema.sql` applied; `supabase/verify.sql` reports the live state of every object it creates |
+| ✅ | Server-side env vars on Vercel: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `META_PIXEL_ID`, `META_API_VERSION`, `META_CAPI_ACCESS_TOKEN`, `DRAIN_SECRET`, `OPS_KEY`, `PUBLIC_BASE_URL`, `N8N_WEBHOOK_URL`, `N8N_INTERNAL_SECRET`, `AIRTABLE_BASE_ID` |
+| ✅ | n8n `LexHive Outbox Drain` on a 60-second schedule, reading its config from Supabase rather than env vars |
+| ✅ | 38 unit tests + a 30-test Playwright suite |
+| ⬜ | `/api/health` and `n8n/lexhive-delivery-monitor.json` — written and committed, not yet deployed and activated |
+| ⬜ | GTM container export committed into `gtm/` |
+| ⬜ | Meta Test Events screenshot (Browser + Server, deduplicated) |
 
-**What was tested (deployed site, 2026-09-09):** Playwright E2E (6 tests: load
-+ dataLayer cleanliness, qualified Texas, disqualified, restricted New York,
-ops auth, accessibility) — 5 passed, 1 skipped (ops auth) without `OPS_KEY`,
-all 6 passed with it. Then 14 outbox rows were drained: every one delivered,
-both destinations healthy on `/ops` (p50 684 ms / 1941 ms). A fresh completed
-submission enqueued instantly but stayed `pending` past 90 s — proving the
-Schedule trigger, not any delivery code, was the missing link. Fix: `/api/lead`
-now self-triggers a bounded drain sweep (no client-side throttle — `SKIP
-LOCKED` + attempts make overlapping sweeps safe) on every completed submission,
-**before** the response so Vercel cannot freeze it away. Live re-verified in two
-phases: (1) a single qualified TX submission round-tripped in ~4 s, both outbox
-rows `succeeded` without any manual drain, and the sweep back-filled one older
-stuck `restricted` row; (2) a burst of three rapid submissions (2 TX qualified +
-1 NY restricted) — every row auto-delivered plus the earlier `dfd9d4ad` stalled
-rows healed. Post-E2E final check: **36 rows succeeded, 0 pending, 0 dead**.
-`/ops`: both destinations healthy, `problems: []`. The first E2E run's 4
-failures were harness bugs (answered 6 of 7 questions; consent-label substring
-collision), fixed in the suite; no application bug was found.
+**Verified against production, 9 September 2026.** All three dispositions driven
+end to end through a real browser and cross-checked in Meta Events Manager,
+Airtable and n8n: the browser `Lead` event carried the same `event_id` the
+server persisted, restricted leads reached neither a contact field nor a Meta
+optimisation event, and both Airtable tables received what they should. Meta
+reports 8.0/10 match quality on `Lead` with browser and server both delivering.
 
-**To finish:** activate the `LexHive Outbox Drain` workflow in n8n — seed
-`public.app_config` (see `supabase/schema.sql`), add the Supabase service-role
-credential in n8n, import `n8n/lexhive-outbox-drain.json`, and flip it on. The
-workflow reads its base URL and drain secret from that Supabase row rather than
-from n8n environment variables, which this instance blocks inside nodes. Then `docs/gtm-setup.md` (export the
-container into `gtm/`) and the Meta Test Events deduplication screenshot.
+That run also found the outage this repository is now built around — the drain
+had never once executed. `docs/verification-2026-09-09.md` is the full record;
+`PRODUCTION.md` §3 is what came of it.
+
+**To finish:** redeploy so `/api/health` is live, then import and activate
+`n8n/lexhive-delivery-monitor.json`. Then export the GTM container into `gtm/`
+(`docs/gtm-setup.md`) and capture the Meta Test Events deduplication
+screenshot.
 
 ---
 
@@ -89,7 +75,7 @@ moment Postgres commits.** Meta and Airtable are deliveries, not dependencies.
 is configured in GTM container `GTM-P34XGVL3`. The app pushes four events to
 the dataLayer (`src/lib/datalayer.ts`) and the container decides who hears about
 them, so adding a vendor is a container change rather than a deploy. The
-container export lives in `gtm/`, for the same reason the n8n workflows do:
+container export belongs in `gtm/`, for the same reason the n8n workflows do:
 configuration that exists only in someone's account is configuration nobody can
 review. `docs/gtm-setup.md` has the tag-by-tag build.
 

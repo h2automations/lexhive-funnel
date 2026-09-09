@@ -6,20 +6,25 @@
 ## The decision everything follows from
 
 The request is finished the moment Postgres commits. Meta and Airtable are
-*deliveries*, not dependencies — `/api/lead` writes the lead, enqueues an outbox
-row per destination and returns; a worker drains it on a 60-second n8n schedule.
-No downstream outage can lose a lead, and no downstream latency is paid by the
-person filling in the form.
+*deliveries*, not dependencies — `/api/lead` writes the lead and enqueues an
+outbox row per destination; a worker drains it on a 60-second n8n schedule. No
+downstream outage can lose a lead.
+
+One deliberate exception: a completed submission also runs a **bounded
+4-second drain sweep before responding**. Vercel can freeze an invocation the
+moment it returns, so work started after the response may never run — the
+choice is between the person waiting a moment and the delivery being silently
+dropped. The person waits, capped by an AbortController, with the n8n schedule
+as the real backstop.
 
 ## Assumptions
 
-- US Social Security disability, since the reference funnel is SSDI. Phone
-  numbers are normalised to E.164 and dropped rather than guessed at when
-  invalid.
-- The restricted-state list is the twelve states commonly restricted for legal
-  lead gen. It lives in a `state_rules` table and is read on every submission,
-  so compliance changes it with an `UPDATE` and no deploy.
-- "Structured database" is Airtable via n8n, per the brief's house stack.
+US Social Security disability, since the reference funnel is SSDI — phone
+normalization adds the US country code, digits only as Meta expects, and drops
+anything invalid rather than guessing. The restricted-state list is the twelve
+states commonly restricted for legal lead gen; it lives in a `state_rules`
+table read on every submission, so compliance changes it with an `UPDATE` and
+no deploy. "Structured database" is Airtable via n8n, per the brief's stack.
 
 ## Trade-offs
 
@@ -33,9 +38,9 @@ impossible.
 dataLayer events and the container fires Meta, GA4 and Clarity from them, so a
 new vendor is a container change rather than a deploy. The trade: dedup now depends on the Pixel tag's Event ID field being
 mapped to `{{DLV - event_id}}`, and if it isn't, nothing errors and every
-conversion is counted twice. The container is exported into `gtm/` alongside
-the n8n workflows so that field is reviewable in a diff rather than buried in
-a UI.
+conversion is counted twice. The container export belongs in `gtm/` alongside the
+n8n workflows for that reason: the one field the dedup depends on should be
+reviewable in a diff, not buried in a UI.
 
 **`event_time` is the conversion moment, not the delivery attempt.** The drain
 retries with backoff to a 32-minute ceiling over six attempts, so stamping
@@ -49,10 +54,6 @@ city, and filling it with the state costs match quality rather than adding it.
 ZIP and gender *are* asked: one tap each, both
 real keys. "Prefer not to say" maps to a value the CAPI client drops rather
 than hashes, so opting out sends Meta nothing rather than a placeholder.
-
-**n8n schedules the drain, not Vercel Cron.** Hobby caps cron at once a day,
-useless for a 60-second retry loop — and the automation layer visibly
-orchestrating recovery beats a hidden platform cron anyway.
 
 **Health signals stay out of the ad platforms.** Meta flagged this domain under
 its Business Tool Terms as *"associated with medical conditions"* — the real
@@ -70,21 +71,20 @@ one devtools console away from being ignored.
 
 - **Partial saves** — every answer updates one lead row, so an abandoned funnel
   leaves a recoverable record and a per-step drop-off point.
-- **`/ops`** — delivery health, p50/p95 latency, a replay button. Recovery has
-  to be something a non-engineer can do at 2am; a delivery only an engineer with
-  database access can replay isn't recoverable, it's logged.
-- **Observability** — structured JSON logs, Sentry, and an `app_events` table
-  for domain events. No personal data reaches any of them, enforced by a tested
-  redactor rather than by every call site remembering.
-- **Accessibility as a conversion argument** — 4rem targets, one question per
-  screen, focus moved for screen readers, a rem scale so an enlarged device font
-  actually enlarges the page. For people over 40 who can't work, usually on a
-  phone, often with a vision impairment, legibility and completion rate are the
-  same variable.
-- **38 tests** over the compliance decision, CAPI normalization, the log
-  redactor and the delivery-health thresholds — the four places a bug is silent
-  rather than loud — plus a Playwright suite covering the same invariants from
-  the outside, including `eid` on the wire.
+- **`/ops`** — delivery health, p50/p95 latency, a replay button. A delivery
+  only an engineer with database access can replay isn't recoverable, it's
+  logged.
+- **Observability** — structured JSON logs, Sentry, an `app_events` table. No
+  personal data reaches any of them, enforced by a tested redactor rather than
+  by every call site remembering.
+- **Accessibility as a conversion argument** — 4rem targets, focus moved for
+  screen readers, a rem scale so an enlarged device font actually enlarges the
+  page. For people over 40 who can't work, usually on a phone, often with a
+  vision impairment, legibility and completion rate are the same variable.
+- **38 unit tests** over the four places a bug here is silent rather than loud —
+  the compliance decision, CAPI normalization, the log redactor, the
+  delivery-health thresholds — plus a Playwright suite checking the same
+  invariants from the outside, including `eid` on the wire.
 
 ## The failure we actually had
 

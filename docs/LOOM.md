@@ -21,9 +21,12 @@ Open these tabs before recording, in this order:
 > "A qualification funnel for Social Security disability. Everything here
 > follows from one decision: the request is finished the moment Postgres
 > commits. Meta and Airtable aren't dependencies, they're deliveries. The API
-> writes the lead, enqueues an outbox row per destination, and returns — so no
-> downstream outage can lose a lead, and no downstream latency is paid by the
-> person filling in the form."
+> writes the lead and enqueues an outbox row per destination, so no downstream
+> outage can lose a lead. There's one deliberate exception — a completed
+> submission also runs a bounded four-second drain sweep before responding,
+> because Vercel can freeze an invocation the moment it returns and work
+> started after the response isn't guaranteed to run. The person waits a moment
+> rather than the delivery being silently dropped."
 
 Show `api/lead.ts` for three seconds — the insert, the enqueue, the return.
 Don't read it aloud.
