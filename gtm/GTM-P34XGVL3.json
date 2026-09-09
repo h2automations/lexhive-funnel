@@ -1,6 +1,6 @@
 {
   "exportFormatVersion": 2,
-  "exportTime": "2026-09-09 18:28:05",
+  "exportTime": "2026-09-09 18:37:05",
   "containerVersion": {
     "path": "accounts/6375857172/containers/263605379/versions/0",
     "accountId": "6375857172",
@@ -637,6 +637,77 @@
         "consentSettings": {
           "consentStatus": "NOT_SET"
         }
+      },
+      {
+        "accountId": "6375857172",
+        "containerId": "263605379",
+        "tagId": "26",
+        "name": "GA4 – application_submitted",
+        "type": "gaawe",
+        "parameter": [
+          {
+            "type": "BOOLEAN",
+            "key": "sendEcommerceData",
+            "value": "false"
+          },
+          {
+            "type": "LIST",
+            "key": "eventSettingsTable",
+            "list": [
+              {
+                "type": "MAP",
+                "map": [
+                  {
+                    "type": "TEMPLATE",
+                    "key": "parameter",
+                    "value": "variant"
+                  },
+                  {
+                    "type": "TEMPLATE",
+                    "key": "parameterValue",
+                    "value": "{{DLV - variant}}"
+                  }
+                ]
+              },
+              {
+                "type": "MAP",
+                "map": [
+                  {
+                    "type": "TEMPLATE",
+                    "key": "parameter",
+                    "value": "disposition"
+                  },
+                  {
+                    "type": "TEMPLATE",
+                    "key": "parameterValue",
+                    "value": "{{DLV - disposition}}"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "TEMPLATE",
+            "key": "eventName",
+            "value": "application_submitted"
+          },
+          {
+            "type": "TEMPLATE",
+            "key": "measurementIdOverride",
+            "value": "G-Z5K86SX1QY"
+          }
+        ],
+        "fingerprint": "1788978976823",
+        "firingTriggerId": [
+          "25"
+        ],
+        "tagFiringOption": "ONCE_PER_EVENT",
+        "monitoringMetadata": {
+          "type": "MAP"
+        },
+        "consentSettings": {
+          "consentStatus": "NOT_SET"
+        }
       }
     ],
     "trigger": [
@@ -722,6 +793,31 @@
           }
         ],
         "fingerprint": "1788953897331"
+      },
+      {
+        "accountId": "6375857172",
+        "containerId": "263605379",
+        "triggerId": "25",
+        "name": "CE - Application Submitted",
+        "type": "CUSTOM_EVENT",
+        "customEventFilter": [
+          {
+            "type": "EQUALS",
+            "parameter": [
+              {
+                "type": "TEMPLATE",
+                "key": "arg0",
+                "value": "{{_event}}"
+              },
+              {
+                "type": "TEMPLATE",
+                "key": "arg1",
+                "value": "application_submitted"
+              }
+            ]
+          }
+        ],
+        "fingerprint": "1788978900917"
       }
     ],
     "variable": [
@@ -900,7 +996,7 @@
         "name": "Analytics Session ID"
       }
     ],
-    "fingerprint": "1788978484631",
+    "fingerprint": "1788979025069",
     "tagManagerUrl": "https://tagmanager.google.com/#/versions/accounts/6375857172/containers/263605379/versions/0?apiLink=version",
     "customTemplate": [
       {

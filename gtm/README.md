@@ -11,8 +11,8 @@ the next export lands as a diff rather than a second file.
 
 ## What's in it
 
-Seven tags, four triggers, five variables. The app pushes three dataLayer
-events and the container decides who hears about them.
+Eight tags, five triggers, five variables. The app pushes four dataLayer events
+and the container decides who hears about each one.
 
 | Tag | Fires on | dataLayer event |
 |---|---|---|
@@ -22,7 +22,11 @@ events and the container decides who hears about them.
 | Facebook Pixel – Qualified Lead | `CE - Qualified Lead` | `qualified_lead` |
 | Ga4 - Config | Initialization, excluding `/ops` | — |
 | GA4 – funnel_step | `CE - Funnel Step` | `funnel_step` |
+| GA4 – application_submitted | `CE - Application Submitted` | `application_submitted` |
 | GA4 – generate_lead | `CE - Qualified Lead` | `qualified_lead` |
+
+Meta hears about four events; GA4 hears about three. The asymmetry is the
+point — see below.
 
 ## The two lines worth reading
 
@@ -40,18 +44,33 @@ green tick, and every conversion is counted twice. It appears once and only
 once because `Lead` is the only event with a server counterpart — the others
 have nothing to deduplicate against.
 
-**Advanced matching.** All four Meta tags carry
-`{{DLV - external_id}}`. `PageView` fires on `funnel_ready` rather than All
-Pages for exactly this reason: GTM loads before React mounts, so a page-level
-trigger would initialise the Pixel before an `external_id` exists and send the
-first event of every session with nothing to match on.
+**Advanced matching.** All four Meta tags carry `{{DLV - external_id}}`.
+`PageView` fires on `funnel_ready` rather than All Pages for exactly this
+reason: GTM loads before React mounts, so a page-level trigger would initialise
+the Pixel before an `external_id` exists and send the first event of every
+session with nothing to match on.
+
+## Why `application_submitted` goes to GA4 and not to Meta
+
+The app pushes `application_submitted` on every completion and `qualified_lead`
+only when the lead is actionable. The gap between them — people who finish the
+form and are knocked out — is a real product metric: it says whether the
+qualification questions are too strict, and it is how a broken knockout rule
+would show up.
+
+It is measured in GA4, with `disposition` as an event parameter so the count
+splits into qualified, restricted and disqualified. It is deliberately **not** a
+second Meta conversion event: the server only sends `Lead`, and only for
+qualified leads, so a browser-only `SubmitApplication` would have no CAPI half,
+nothing to deduplicate against, and would add a second conversion signal from a
+domain Meta has classified as health-related. One conversion event, because
+there is only one worth optimising toward.
+
+`disposition`, `variant` and `step_number` have to be registered as GA4 custom
+dimensions (Admin → Custom definitions) or the parameters are recorded and
+invisible.
 
 ## Not in here
-
-No Meta `SubmitApplication` tag. The app still pushes `application_submitted`
-and that metric is worth having — form completions versus qualified leads — but
-it belongs in GA4 and the database, not in a second browser-only conversion
-event on a domain Meta has classified as health-related. See `SUBMISSION.md`.
 
 No Microsoft Clarity tag. It was set up and later removed;
 `docs/gtm-setup.md` §5 still describes the configuration if it is reintroduced.
