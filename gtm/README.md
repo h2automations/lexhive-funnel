@@ -83,3 +83,29 @@ No Microsoft Clarity tag. It was set up and later removed;
 The contact form keeps `data-clarity-mask="true"` in the markup regardless,
 which costs nothing and means the mask is already in place if any session
 recorder is ever added.
+
+## Do not use Meta's Event Setup Tool
+
+Events Manager offers a codeless click-tracker ("Set up events" → **Add
+events**). It looks like the easy path and it would quietly dismantle three
+decisions at once.
+
+Events it creates fire from the browser only. There is no server counterpart
+and no `event_id`, so they have nothing to deduplicate against — the whole
+contract this container exists to keep. It identifies what was clicked by
+capturing button text and URL fragments, which on a domain Meta has classified
+under its Business Tool Terms as associated with medical conditions is exactly
+the signal the step-ordinal dataLayer was built to withhold. And it writes tags
+outside GTM, so the container export in this directory would stop describing
+what actually fires and no one reading the repo would know.
+
+If a new event is genuinely needed, it belongs in `src/lib/datalayer.ts` as a
+dataLayer push and in this container as a tag — which is the whole reason the
+app publishes events rather than calling `fbq` itself.
+
+A related note: if Events Manager reports that pixel `27653864700958179` "wasn't
+detected on this website", that is the correct answer, not a fault. That
+dataset is an abandoned duplicate under a different ad account and shares the
+name `lexhive-assignment` with the live one. The site fires
+`3238075189714579`; `/api/health` reports the server's id so the pair can be
+compared from outside.
