@@ -88,12 +88,62 @@ container export belongs in `gtm/`, for the same reason the n8n workflows do:
 configuration that exists only in someone's account is configuration nobody can
 review. `docs/gtm-setup.md` has the tag-by-tag build.
 
-**Deduplication.** `/api/lead` generates the `event_id`, stores it on the lead
-row, and returns it. The browser fires the Pixel's `Lead` event with
-that exact value while the drain worker sends the same one to the Conversions
-API. Making the server the source of truth means a mismatch is structurally
-impossible rather than merely unlikely — the common pattern of minting the ID
-client-side and hoping the server echoes it breaks silently on any retry.
+**Deduplication.** The funnel creates one stable submission UUID in the browser
+when the qualification session starts. That `submission_id` is sent to
+`/api/lead`, where the server:
+
+1. validates that it is a valid UUID,
+2. persists it in Supabase as the lead's `event_id`,
+3. re-reads the stored value from the database, and
+4. returns that persisted `event_id` to the browser.
+
+From that point onward, the database value is treated as authoritative. The same
+persisted `event_id` is used by both Meta delivery paths:
+
+```text
+Browser creates submission_id
+        ↓
+POST /api/lead
+        ↓
+Server validates UUID
+        ↓
+Supabase persists:
+submission_id = ABC123
+event_id      = ABC123
+        ↓
+Server returns stored event_id
+        ↓
+┌─────────────────────────┬─────────────────────────┐
+│ Browser / Meta Pixel    │ Server / Meta CAPI      │
+│                         │                         │
+│ event_name = Lead       │ event_name = Lead       │
+│ event_id   = ABC123     │ event_id   = ABC123     │
+└─────────────────────────┴─────────────────────────┘
+                 ↓
+        Meta deduplication
+```
+
+The browser does **not** generate a separate Meta event ID after submission, and
+the server does **not** create a second independent Meta event ID.
+
+For qualified leads, the browser receives the server-returned `eventId` and
+pushes it into the data layer with the `qualified_lead` event. GTM maps that
+value to the Meta Pixel `Lead` event's Event ID.
+
+The server-side Meta CAPI delivery reads the same persisted `event_id` from the
+lead/outbox data and sends:
+
+```text
+event_name = Lead
+event_id   = <same persisted event_id>
+```
+
+Because the browser Pixel and server CAPI use the same `event_name` and
+`event_id`, Meta can recognize them as the same conversion and deduplicate them
+instead of counting two separate leads.
+
+Retries also preserve the original persisted `event_id`; a new event ID is not
+generated for the same lead.
 
 With tags in GTM the browser half of that is a field: the Meta Pixel tag's
 **Event ID** must map to `{{DLV - event_id}}`. Unmapped, nothing looks wrong —
