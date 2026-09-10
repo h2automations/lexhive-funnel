@@ -29,6 +29,8 @@ export interface Attribution {
   firstSeenAt: number;
 }
 
+import { newUuid } from './uuid';
+
 const SESSION_KEY = 'lexhive_session_id';
 const FIRST_SEEN_KEY = 'lexhive_first_seen';
 const ATTRIBUTION_KEY = 'lexhive_attribution';
@@ -50,14 +52,19 @@ function safeSet(key: string, value: string): void {
   }
 }
 
-/** Set or reuse a first-party session UUID used as Meta's external_id. */
+/**
+ * Set or reuse a first-party session UUID used as Meta's external_id.
+ *
+ * Nothing validates this one's shape, so the old inline `crypto.randomUUID`
+ * fallback was harmless here — but it is the same fallback that killed the
+ * funnel outright on older Safari when used for `submissionId`, so both now go
+ * through the one helper rather than leaving a working copy of the broken
+ * pattern in the codebase for someone to reach for next time.
+ */
 export function getExternalId(): string {
   let id = safeGet(SESSION_KEY);
   if (!id) {
-    id =
-      typeof crypto !== 'undefined' && 'randomUUID' in crypto
-        ? crypto.randomUUID()
-        : `s-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    id = newUuid();
     safeSet(SESSION_KEY, id);
   }
   return id;

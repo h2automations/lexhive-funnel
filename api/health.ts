@@ -2,8 +2,18 @@
  * GET /api/health
  *
  * The dead-man's switch, exposed. Unauthenticated on purpose: it returns three
- * ages and a count, no personal data and no configuration, and a health check
- * that needs a secret is a health check nobody wires up.
+ * ages, a count and one public identifier — no personal data and no secrets —
+ * and a health check that needs a credential is a health check nobody wires up.
+ *
+ * The identifier is `meta_pixel_id`, and it is here to close the one
+ * deduplication failure that is otherwise completely silent. The browser gets
+ * its pixel id from the GTM container; the server gets it from
+ * `META_PIXEL_ID`. If those two ever diverge, both events keep being sent,
+ * both keep returning success, and they simply land in different pixels and
+ * never meet — the symptom reads as "deduplication stopped working" with
+ * nothing broken anywhere to find. Returning it makes the mismatch checkable
+ * from outside, which is what `tests/tags.spec.ts` does. It is not a secret to
+ * give away: a pixel id is in the page source of every visitor's browser.
  *
  * 200 when delivery is healthy, 503 when it is not — so any uptime monitor,
  * including ones that cannot read a response body, works against it with no
@@ -69,6 +79,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return res.status(report.status === 'healthy' ? 200 : 503).json({
       ...report,
       summary: summarise(report),
+      // Null rather than '' when unset, so "not configured" is distinguishable
+      // from "configured as an empty string" by anything reading this.
+      meta_pixel_id: process.env.META_PIXEL_ID || null,
       checked_at: new Date().toISOString(),
       requestId: log.requestId,
     });

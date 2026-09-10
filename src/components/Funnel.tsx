@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { getExternalId, getAttribution, refreshCookies } from '../lib/tracking';
 import { STATES, type Option } from '../lib/states';
 import { funnelReady, funnelStep, leadSubmitted } from '../lib/datalayer';
+import { newUuid } from '../lib/uuid';
 import { CheckIcon, ChevronLeftIcon, ChevronRightIcon, CrossIcon } from './Icons';
 
 /**
@@ -94,11 +95,14 @@ const STEPS = QUESTIONS.length + 1; // +1 for the contact step
  * nobody can resolve back to wording six months later.
  */
 const CONSENT_VERSION = 'v1.1';
+const NURTURE_CONSENT_VERSION = 'disqualified_nurture_v1';
 const CONSENT_TEXT = {
   standard:
     'I consent to be contacted by phone, text message, or email about Social Security disability benefits, including by automated dialing technology. Consent is not a condition of any purchase.',
   restricted:
     'I understand this is not an application for benefits and that no one will contact me about this enquiry.',
+  nurture:
+    'I agree to be contacted about other potentially relevant programs, services, or future eligibility opportunities.',
 } as const;
 
 const EMPTY_CONTACT: Contact = {
@@ -130,18 +134,37 @@ export default function Funnel({ variant }: { variant: string }) {
   const leadIdRef = useRef<string | null>(null);
   const saveQueueRef = useRef<Promise<unknown>>(Promise.resolve());
   const mainRef = useRef<HTMLDivElement>(null);
-  // A disqualified lead is finalised the moment the answer is given; the ref
-  // stops Back/forward re-navigation from firing a second completion.
+  // A disqualified lead is finalised only when the person chooses on the result
+  // screen; the ref stops Back/forward re-navigation from firing a second
+  // completion. `disqOpt` is the person's choice there: leave the flow, or
+  // opt into future-fit program updates.
   const disqualifiedSentRef = useRef(false);
+  // Two different guards, because they answer two different questions.
+  //
+  // `submitInFlightRef` stops a second request while one is open. React sets
+  // `status` asynchronously, so `disabled={status === 'submitting'}` on the
+  // button is a render-time promise, not a re-entry lock.
+  //
+  // `conversionPushedRef` is the one that matters for measurement. If the
+  // server commits but the response never arrives, the person sees an error
+  // and presses the button again; /api/lead is idempotent and replies with the
+  // SAME event_id, so a second push would put two `qualified_lead` events on
+  // the dataLayer for one conversion. Meta collapses them (same event_name,
+  // same event_id, that is what deduplication is), but GA4 counts a second
+  // `generate_lead` and the funnel report starts lying. Latched on the push
+  // rather than on the request, so a genuine failure can still be retried.
+  const submitInFlightRef = useRef(false);
+  const conversionPushedRef = useRef(false);
+  const [disqOpt, setDisqOpt] = useState<'none' | 'exit' | 'nurture'>('none');
+  const [nurtureOpted, setNurtureOpted] = useState(false);
 
   const externalId = useMemo(() => getExternalId(), []);
-  const submissionId = useMemo(
-    () =>
-      typeof crypto !== 'undefined' && 'randomUUID' in crypto
-        ? crypto.randomUUID()
-        : `submission-${Date.now()}-${Math.random().toString(16).slice(2)}`,
-    []
-  );
+  // One id for this browser session's submission, minted once at mount and
+  // stable across every rerender. `/api/lead` validates it as a UUID and
+  // persists it as `leads.event_id` — the id the browser Pixel and the
+  // Conversions API both fire with — so a non-UUID here does not degrade
+  // tracking, it 400s the whole funnel. See src/lib/uuid.ts.
+  const submissionId = useMemo(() => newUuid(), []);
   const restricted = result === 'restricted';
 
   const stateValue = answers.state?.a ?? '';
@@ -207,13 +230,25 @@ export default function Funnel({ variant }: { variant: string }) {
     return pending;
   }
 
-  /** Finalise a lead that will never be contacted: no contact fields, no consent. */
-  async function completeWithoutContact(nextAnswers: Record<string, Answer>) {
+  /**
+   * Finalise a disqualified lead. The opt-in is the whole story: false means
+   * the person leaves with nothing stored beyond their answers and status; true
+   * means a minimal contact and the nurture consent ARE stored, and the lead
+   * is routed to the nurture pipeline — never the sales one. The server
+   * enforces all of this; this code only declares intent.
+   */
+  async function completeDisqualified(args: {
+    followUpOptIn: boolean;
+    contact?: { firstName: string; email?: string; phone?: string };
+    consent?: { version: string; text: string; given: boolean; timestamp: string };
+  }) {
     if (disqualifiedSentRef.current) return;
     disqualifiedSentRef.current = true;
+    setStatus('submitting');
+    setError(null);
     try {
       await saveQueueRef.current;
-      await fetch('/api/lead', {
+      const res = await fetch('/api/lead', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
@@ -221,16 +256,83 @@ export default function Funnel({ variant }: { variant: string }) {
           submissionId,
           variant,
           status: 'complete',
-          answers: nextAnswers,
-          contact: undefined,
+          answers,
+          followUpOptIn: args.followUpOptIn,
+          contact: args.contact ?? undefined,
+          consent: args.consent ?? undefined,
           attribution: getAttribution(),
           externalId,
         }),
       });
+
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.leadId) {
+        // Honest retry: the choice screen is not a trap. The person can press
+        // the button again rather than being stranded on a dead end.
+        disqualifiedSentRef.current = false;
+        setStatus('error');
+        setError('Something went wrong. Please try again.');
+        return;
+      }
+
+      leadIdRef.current = data.leadId;
+      if (data.disposition) setDisposition(data.disposition);
+      if (args.followUpOptIn) setNurtureOpted(true);
+      setStatus('done');
+      setStep(STEPS);
     } catch {
-      // The disqualified screen is informational; a failed completion retries
-      // on the next attempt the drain reconciliation offers. Do not loop here.
+      disqualifiedSentRef.current = false;
+      setStatus('error');
+      setError('Could not submit. Please check your connection and try again.');
     }
+  }
+
+  function onDisqNoThanks() {
+    void completeDisqualified({ followUpOptIn: false });
+  }
+
+  function validateNurture(): boolean {
+    const errors: Record<string, string> = {};
+    if (!contact.firstName.trim()) errors.firstName = 'Enter your first name.';
+    const digits = contact.phone.replace(/\D/g, '');
+    const validPhone = digits.length === 10 || (digits.length === 11 && digits.startsWith('1'));
+    if (!contact.email.trim() && !contact.phone.trim())
+      errors.phone = 'Enter an email address or phone number we can reach you on.';
+    if (contact.phone.trim() && !validPhone)
+      errors.phone = 'Enter a valid 10-digit phone number, e.g. 555-010-0100.';
+    if (contact.email.trim() && !EMAIL_RE.test(contact.email.trim()))
+      errors.email = 'Enter a valid email address, e.g. name@example.com.';
+    setFieldErrors(errors);
+    if (Object.keys(errors).length > 0) {
+      const first = Object.keys(errors)[0];
+      const el = mainRef.current?.querySelector<HTMLElement>(`[data-field="${first}"]`);
+      el?.focus();
+      return false;
+    }
+    return true;
+  }
+
+  function onDisqNurtureSubmit() {
+    if (disqualifiedSentRef.current || status === 'submitting') return;
+    if (!contact.consent) {
+      setError('Please confirm you want to be contacted about other programs.');
+      return;
+    }
+    if (!validateNurture()) return;
+    void completeDisqualified({
+      followUpOptIn: true,
+      contact: {
+        firstName: contact.firstName.trim(),
+        email: contact.email.trim() || undefined,
+        phone: contact.phone.trim() || undefined,
+      },
+      consent: {
+        version: NURTURE_CONSENT_VERSION,
+        text: CONSENT_TEXT.nurture,
+        given: true,
+        timestamp: new Date().toISOString(),
+      },
+    });
   }
 
   /** The state screen's confirm button: real availability verdict, explicitly confirmed. */
@@ -278,11 +380,13 @@ export default function Funnel({ variant }: { variant: string }) {
     funnelStep({ stepNumber: step + 1, variant });
 
     if (question.id !== 'state' && KNOCKOUT_IDS.includes(question.id) && o.value === 'No') {
-      // A confirmed non-match leaves now — no more questions, no contact form.
-      // The server records the disposition; the screen below is informational.
+      // A confirmed non-match stops the questioning here — no more questions.
+      // What happens next is the person's choice on the result screen: leave
+      // (nothing further stored) or opt into future-fit program updates. The
+      // server records the disposition either way.
       void persistPartial(next);
-      void completeWithoutContact(next);
       setResult('disqualified');
+      setDisqOpt('none');
       return;
     }
 
@@ -318,13 +422,25 @@ export default function Funnel({ variant }: { variant: string }) {
     return true;
   }
 
+  /**
+   * Announce the conversion, at most once per submission. Every caller goes
+   * through here so the latch cannot be forgotten at a new call site.
+   */
+  function pushConversionOnce(args: { eventId: string; disposition: string }) {
+    if (conversionPushedRef.current) return;
+    conversionPushedRef.current = true;
+    leadSubmitted({ eventId: args.eventId, variant, disposition: args.disposition });
+  }
+
   function patch(next: Partial<Contact>, field?: string) {
     setContact((c) => ({ ...c, ...next }));
     if (field && fieldErrors[field]) setFieldErrors((e) => ({ ...e, [field]: '' }));
   }
 
   async function submit() {
+    if (submitInFlightRef.current) return;
     if (!validateContact()) return;
+    submitInFlightRef.current = true;
     setStatus('submitting');
     setError(null);
     try {
@@ -374,26 +490,26 @@ export default function Funnel({ variant }: { variant: string }) {
       // The conversion. `event_id` is the id the server persisted and will send
       // to the Conversions API; the Meta Pixel tag in GTM maps it to Event ID
       // so the two collapse into one conversion. See docs/gtm-setup.md.
-      leadSubmitted({
-        eventId: data.eventId,
-        variant,
-        disposition: data.disposition,
-      });
+      pushConversionOnce({ eventId: data.eventId, disposition: data.disposition });
 
       setStatus('done');
       setStep(STEPS);
     } catch {
       setStatus('error');
       setError('Could not submit. Please check your connection and try again.');
+    } finally {
+      submitInFlightRef.current = false;
     }
   }
 
   /** Restricted leads complete with only their consent — no contact, no more questions. */
   async function submitRestricted() {
+    if (submitInFlightRef.current) return;
     if (!contact.consent) {
       setError('Please confirm you understand that no one will contact you about this enquiry.');
       return;
     }
+    submitInFlightRef.current = true;
     setStatus('submitting');
     setError(null);
     try {
@@ -427,12 +543,14 @@ export default function Funnel({ variant }: { variant: string }) {
       }
       leadIdRef.current = data.leadId;
       if (data.disposition) setDisposition(data.disposition);
-      leadSubmitted({ eventId: data.eventId, variant, disposition: 'restricted' });
+      pushConversionOnce({ eventId: data.eventId, disposition: 'restricted' });
       setStatus('done');
       setStep(STEPS);
     } catch {
       setStatus('error');
       setError('Could not submit. Please check your connection and try again.');
+    } finally {
+      submitInFlightRef.current = false;
     }
   }
 
@@ -448,7 +566,11 @@ export default function Funnel({ variant }: { variant: string }) {
           <p>
             {restricted
               ? 'We have recorded your answers. No one will contact you about this enquiry.'
-              : 'We have received your request. A specialist will review your answers and may contact you.'}
+              : result === 'disqualified'
+                ? nurtureOpted
+                  ? `Thanks for checking your eligibility. We will only contact you if a potentially relevant program comes up — never about this one.`
+                  : `Thanks for checking your eligibility. We have recorded your choice and will not contact you.`
+                : 'We have received your request. A specialist will review your answers and may contact you.'}
           </p>
         </div>
       </div>
@@ -458,11 +580,126 @@ export default function Funnel({ variant }: { variant: string }) {
   // ---- Early exit: confirmed non-match -----------------------------------
 
   if (result === 'disqualified') {
+    // `exit`, not just `done`: this screen must not wear the green
+    // completion tick. A person who has been knocked out has not succeeded
+    // at anything, and a celebratory mark over "may not be a match" reads
+    // as either a bug or a taunt.
+
+    if (disqOpt === 'nurture') {
+      return (
+        <div ref={mainRef} className="funnel">
+          <FunnelHeader intro={false} variant={variant} />
+          <ProgressLabel step={STEPS - 1} total={STEPS} />
+          <div className="funnel-card">
+            <h1 data-focus tabIndex={-1}>
+              Keep me updated
+            </h1>
+            <p className="note">
+              We occasionally work on services that may fit people whose earlier answers did
+              not qualify them for this one. Leave a name and a way to reach you — we will
+              only contact you about other potential opportunities.
+            </p>
+            <form
+              data-clarity-mask="true"
+              onSubmit={(e) => {
+                e.preventDefault();
+                onDisqNurtureSubmit();
+              }}
+            >
+              <label htmlFor="nfirst">First name</label>
+              <input
+                id="nfirst"
+                className="input"
+                autoComplete="given-name"
+                required
+                data-field="firstName"
+                aria-invalid={Boolean(fieldErrors.firstName)}
+                aria-describedby={fieldErrors.firstName ? 'err-nfirst' : undefined}
+                value={contact.firstName}
+                onChange={(e) => patch({ firstName: e.target.value }, 'firstName')}
+              />
+              {fieldErrors.firstName && (
+                <p className="error" id="err-nfirst">
+                  {fieldErrors.firstName}
+                </p>
+              )}
+
+              <label htmlFor="nphone">Phone</label>
+              <input
+                id="nphone"
+                type="tel"
+                className="input"
+                autoComplete="tel"
+                inputMode="tel"
+                data-field="phone"
+                aria-invalid={Boolean(fieldErrors.phone)}
+                aria-describedby={fieldErrors.phone ? 'err-nphone' : undefined}
+                value={contact.phone}
+                onChange={(e) => patch({ phone: e.target.value }, 'phone')}
+              />
+              {fieldErrors.phone && (
+                <p className="error" id="err-nphone">
+                  {fieldErrors.phone}
+                </p>
+              )}
+
+              <label htmlFor="nemail">Email</label>
+              <input
+                id="nemail"
+                type="email"
+                className="input"
+                autoComplete="email"
+                inputMode="email"
+                data-field="email"
+                aria-invalid={Boolean(fieldErrors.email)}
+                aria-describedby={fieldErrors.email ? 'err-nemail' : undefined}
+                value={contact.email}
+                onChange={(e) => patch({ email: e.target.value }, 'email')}
+              />
+              {fieldErrors.email && (
+                <p className="error" id="err-nemail">
+                  {fieldErrors.email}
+                </p>
+              )}
+
+              <div className="consent">
+                <input
+                  id="nconsent"
+                  type="checkbox"
+                  checked={contact.consent}
+                  onChange={(e) => patch({ consent: e.target.checked })}
+                />
+                <label htmlFor="nconsent">{CONSENT_TEXT.nurture}</label>
+              </div>
+
+              {error && (
+                <p className="error" role="alert">
+                  {error}
+                </p>
+              )}
+
+              <button className="btn" type="submit" disabled={status === 'submitting'}>
+                {status === 'submitting' ? 'Submitting…' : 'Send'}
+              </button>
+            </form>
+
+            <button
+              className="link"
+              type="button"
+              disabled={status === 'submitting'}
+              onClick={() => {
+                setDisqOpt('none');
+                setError(null);
+              }}
+            >
+              No thanks, back
+            </button>
+          </div>
+        </div>
+      );
+    }
+
     return (
-      // `exit`, not just `done`: this screen must not wear the green
-      // completion tick. A person who has been knocked out has not succeeded
-      // at anything, and a celebratory mark over "may not be a match" reads
-      // as either a bug or a taunt.
       <div ref={mainRef} className="funnel done exit">
         <div className="funnel-card">
           <h1 data-focus tabIndex={-1}>
@@ -470,7 +707,7 @@ export default function Funnel({ variant }: { variant: string }) {
           </h1>
           <p>
             Based on your answers, our disability support service may not be able to help you.
-            We will not contact you, and no further details are needed.
+            You can leave here, or we can let you know if we later offer something that may fit.
           </p>
           <p>
             The Social Security Administration provides official information about disability
@@ -480,7 +717,28 @@ export default function Funnel({ variant }: { variant: string }) {
             </a>
             .
           </p>
-          <button className="link" type="button" onClick={() => setResult('none')}>
+          <button
+            className="btn"
+            type="button"
+            disabled={status === 'submitting'}
+            onClick={() => setDisqOpt('nurture')}
+          >
+            Keep me updated about programs that may fit
+          </button>
+          <button
+            className="link"
+            type="button"
+            disabled={status === 'submitting'}
+            onClick={onDisqNoThanks}
+          >
+            No thanks
+          </button>
+          <button
+            className="link"
+            type="button"
+            disabled={status === 'submitting'}
+            onClick={() => setResult('none')}
+          >
             Review my answers
           </button>
         </div>

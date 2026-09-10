@@ -71,10 +71,12 @@ Events Manager, Lead event.
 Open Test Events. Point at the single deduplicated Lead.
 
 > "One conversion, received twice — browser Pixel and Conversions API — and
-> collapsed into one because both carry the same event ID. That ID is minted
-> server-side and persisted before it's returned; the browser fires with the
-> value the database gave it. Minting client-side and hoping the server echoes
-> it breaks silently on any retry."
+> collapsed into one because both carry the same event ID. The browser proposes
+> that ID; the database decides it. /api/lead validates it, persists it on the
+> lead row, and returns the stored value — and the Pixel fires with what came
+> back, not with what it sent. The difference matters on a retry: the second
+> request finds the completed row and gets the first one's ID back, so a person
+> who submits twice still produces one conversion."
 
 Then:
 
@@ -91,7 +93,8 @@ Then:
 n8n execution, then Airtable.
 
 > "The drain calls the API, the API delivers to Meta and to this n8n webhook,
-> and n8n routes on disposition."
+> and n8n branches on `lead_type` — Sales, Nurture, or None — not on a
+> disposition it recalculated for itself."
 
 Switch to the Restricted table. Scroll the columns.
 
@@ -130,12 +133,24 @@ Wait for the next drain tick, refresh, 200.
 
 > "And it heals itself, because the next successful drain stamps it again."
 
-## 4:45 — 5:00 · Close
+## 4:15 — 4:40 · Disqualified is a decision, not a default
+
+New session, Texas, "No" on the work question.
+
+> "A knockout doesn't just dump people on a dead-end. The person chooses what
+> happens next: leave, and nothing further is stored — or 'keep me updated',
+> which captures minimal contact under a separate, explicit consent and routes
+> to the nurture pipeline as a Nurture row and a NurtureOptIn Meta event. It
+> deliberately never fires the qualified conversion. And restricted still
+> outranks everything: the contact is stripped server-side whatever the browser
+> claims, and its row enqueues nothing."
+
+## 4:40 — 4:55 · Close
 
 > "Config's in Supabase rather than env vars, so rotating the drain secret is
-> one UPDATE. Thirty-eight unit tests over the four places a bug here is silent
-> rather than loud, and a Playwright suite that checks the same invariants from
-> the outside — including whether the event ID is actually on the wire, because
+> one UPDATE. Fifty-one unit tests over the places a bug here is silent rather
+> than loud, and a Playwright suite that checks the same invariants from the
+> outside — including whether the event ID is actually on the wire, because
 > that's a GTM field that fails with a green tick.
 >
 > Next two things I'd do: rate limiting on the public endpoint, and real auth on
@@ -149,7 +164,8 @@ Don't demo the ops page. It duplicates what `/api/health` already showed and
 costs forty seconds you need elsewhere.
 
 If you overrun, cut §3:15 to fifteen seconds — one sentence over the Airtable
-row. Do not cut §3:55. The incident is the most senior thing in this
+row — and §4:15 (disqualified/nurture) to a single spoken sentence over the
+choice screen. Do not cut §3:55. The incident is the most senior thing in this
 submission: a prediction, a real failure, and the mechanism that closes it.
 
 Say "I don't know" if asked something you don't. It reads better than a guess,

@@ -32,18 +32,16 @@ const PIXEL_HOST = 'facebook.com/tr';
 
 test.describe('tag integration', () => {
   test('the funnel ships no hardcoded vendor snippet', async ({ page }) => {
-    // The single-container decision, enforced. Every tag moved into GTM so
-    // that adding a vendor is a container change rather than a deploy; a
-    // snippet creeping back into index.html silently reintroduces a second
-    // Pixel initialisation, which is how a container ends up double-counting.
+    // Nothing about tags lives in index.html. The GTM container loads from
+    // code (src/main.tsx), which is what lets the app keep it OFF /ops, and its
+    // tags are configured in the container — so a vendor belongs in a container
+    // change, not a deploy. A snippet creeping back into index.html silently
+    // reintroduces a second Pixel initialisation, which is how a container ends
+    // up double-counting.
     const html = await (await page.request.get(FUNNEL_PATH)).text();
 
-    expect(html, 'the GTM container snippet is missing from index.html').toContain(
-      'googletagmanager.com/gtm.js'
-    );
-
-    for (const snippet of ['connect.facebook.net', 'fbq(', 'gtag(', 'clarity.ms']) {
-      expect(html, `"${snippet}" is hardcoded in index.html — it belongs in the container`).not.toContain(
+    for (const snippet of ['googletagmanager.com/gtm.js', 'connect.facebook.net', 'fbq(', 'gtag(', 'clarity.ms']) {
+      expect(html, `"${snippet}" is hardcoded in index.html — it belongs in main.tsx or the container`).not.toContain(
         snippet
       );
     }
@@ -79,6 +77,40 @@ test.describe('tag integration', () => {
       matchKeys.join(','),
       'external_id is not mapped on the Pixel base tag; it is the one match key available before the person types anything'
     ).toContain('ud[external_id]');
+  });
+
+  test('the browser and the server are pointing at the same pixel', async ({ page }) => {
+    // Deduplication has one failure mode that produces no error anywhere: the
+    // browser sends to the pixel in the GTM container, the server sends to
+    // META_PIXEL_ID on Vercel, both return success, and if those two values
+    // differ the events land in different pixels and never meet. Every other
+    // check in this file would still pass. /api/health reports the server's
+    // value (it is public — it is in the page source already) precisely so
+    // this comparison is possible from outside.
+    const pixel: URL[] = [];
+    page.on('request', (request) => {
+      const url = request.url();
+      if (url.includes(PIXEL_HOST)) pixel.push(new URL(url));
+    });
+
+    const health = await page.request.get('/api/health');
+    const { meta_pixel_id: serverPixelId } = (await health.json()) as {
+      meta_pixel_id: string | null;
+    };
+    expect(
+      serverPixelId,
+      'META_PIXEL_ID is not set on the server — every Conversions API send is failing as retryable'
+    ).toBeTruthy();
+
+    await gotoFunnel(page);
+    const first = await waitFor(() => pixel[0]);
+    test.skip(!first, 'No Meta Pixel request observed — the container is unpublished, or this network blocks Meta.');
+
+    expect(
+      first!.searchParams.get('id'),
+      `the browser fires into pixel ${first!.searchParams.get('id')} but the server sends to ${serverPixelId} — ` +
+        'the two conversions can never deduplicate because they are not in the same pixel'
+    ).toBe(serverPixelId);
   });
 
   test('the browser Lead event carries the event_id the server persisted', async ({ page }) => {
@@ -129,14 +161,27 @@ test.describe('tag integration', () => {
       'the Lead tag is not sending the server event_id as Event ID — browser and CAPI conversions will not deduplicate'
     ).toBe(eventId);
 
+    // One conversion, one browser event. The submit handler latches on the
+    // push rather than on the request (Funnel.tsx, conversionPushedRef),
+    // because /api/lead is idempotent: a person who retries after a failed
+    // response gets the same event_id back, and pushing it twice would double
+    // GA4's generate_lead for a single conversion. Meta would still collapse
+    // the pair — same event_name, same event_id — which is exactly why this
+    // has to be asserted rather than trusted to show up in a conversion count.
+    const leadEvents = pixel.filter((url) => url.searchParams.get('ev') === 'Lead');
+    expect(
+      leadEvents.map((url) => url.searchParams.get('eid')),
+      'more than one browser Lead event fired for a single submission'
+    ).toHaveLength(1);
+
     expect(leaked, 'contact details reached a third-party host in plaintext').toEqual([]);
   });
 
   test('no ad or analytics tag fires on the ops surface', async ({ page }) => {
-    // GTM itself is deliberately not in this list: the container snippet is in
-    // index.html and loads everywhere. What must not happen is a tag firing
-    // from it — counting 2am debugging as campaign traffic distorts exactly
-    // the numbers that spending decisions are made on.
+    // GTM itself is gated OUT of /ops in src/main.tsx: the guard is route-aware
+    // in a way an index.html snippet cannot be. What must not happen is any tag
+    // firing from /ops — counting 2am debugging as campaign traffic distorts
+    // exactly the numbers that spending decisions are made on.
     //
     // Clarity is also excluded on purpose. It records interaction, feeds no
     // optimisation, and /ops shows no personal data by design, so a recording

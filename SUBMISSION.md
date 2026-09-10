@@ -26,16 +26,30 @@ states commonly restricted for legal lead gen; it lives in a `state_rules`
 table read on every submission, so compliance changes it with an `UPDATE` and
 no deploy. "Structured database" is Airtable via n8n, per the brief's stack.
 
+The screen order and wording are a deliberate screening model, not an exact
+reproduction of the reference. State is asked second (a native picker behind an
+explicit "Check availability" confirm) so an unsupported state exits early, and
+work history is asked as the SSA 20-of-40-quarters rule. The reference's age
+range differs from this funnel's 18–64, so claim submissions should treat the
+six questions as targeting assumptions to confirm against the real offer, not
+as the brief's gospel.
+
 ## Trade-offs
 
-**Deduplication is server-authoritative.** `/api/lead` validates and persists
-the stable submission UUID as `event_id`, then returns the database value; the browser Pixel fires with that exact value and the
-drain sends the same one to the CAPI. Minting client-side and hoping the server
-echoes it breaks silently on any retry — this way a mismatch is structurally
-impossible.
+**Deduplication is server-authoritative.** The browser proposes a submission
+UUID; `/api/lead` validates it, persists it as `event_id`, and returns the
+stored value. The Pixel fires with what came back, not with what it sent, and
+the drain sends the same stored value to the CAPI — so a person who submits
+twice is handed the first attempt's id and still produces one conversion.
+`/api/health` also reports `meta_pixel_id`: both halves can carry the right
+event id and still never meet if the container and `META_PIXEL_ID` name
+different pixels, which fails with no error at all. `tests/tags.spec.ts`
+asserts they match.
 
-**All browser tags live in GTM**, not in the code. The app publishes three
-dataLayer events and the container fires Meta and GA4 from them, so a
+**All browser tags live in GTM**, not in the code. The app publishes four
+dataLayer events (`funnel_ready`, `funnel_step`, the conversion
+`application_submitted`, and the optimization-gated `qualified_lead`) and the
+container fires Meta and GA4 from them, so a
 new vendor is a container change rather than a deploy. The trade: dedup now depends on the Pixel tag's Event ID field being
 mapped to `{{DLV - event_id}}`, and if it isn't, nothing errors and every
 conversion is counted twice. The container export belongs in `gtm/` alongside the
@@ -51,9 +65,13 @@ already knows when the person actually converted, so that is what is sent.
 
 **Match keys are chosen, not maximised.** `ct` is not sent — the funnel has no
 city, and filling it with the state costs match quality rather than adding it.
-ZIP and gender *are* asked: one tap each, both
-real keys. "Prefer not to say" maps to a value the CAPI client drops rather
-than hashes, so opting out sends Meta nothing rather than a placeholder.
+ZIP is asked as an optional field (one tap, a real key); gender is not asked at
+all — the UX review removed it because it was a match key, not a knockout
+question, and the schema column it left behind is now dropped. Contact is
+phone-led: name and phone required, email and ZIP optional. "Prefer not to say"
+mapped to a value the CAPI client drops rather than hashes, so opting out sent
+Meta nothing rather than a placeholder (that option itself is gone with
+gender).
 
 **Health signals stay out of the ad platforms.** Meta flagged this domain under
 its Business Tool Terms as *"associated with medical conditions"* — the real
@@ -67,6 +85,20 @@ masked at the markup rather than by a dashboard setting.
 **Restriction is decided server-side.** The browser is told its disposition; it
 never decides. A compliance rule enforced in client code is a compliance rule
 one devtools console away from being ignored.
+
+**Disqualified ≠ muted — it is a distinct, opt-in relationship.** A knockout
+exit navigates to a choice screen: "No thanks" (nothing further stored) or
+"Keep me updated", which captures minimal contact (first name, email, phone)
+plus a *separate* consent — `disqualified_nurture_v1` — and routes to the
+nurture pipeline as a `Nurture` row in Airtable and a custom `NurtureOptIn`
+event in Meta. It never fires the `Lead` conversion, and a disqualified person
+without the opt-in never becomes a lead at all: the server strips their contact
+entirely and enqueues **no** delivery rows. Restricted stays the hardest rule —
+contact is stripped server-side regardless of what the browser claims, and no
+outbox row is created. The whole policy lives in
+`api/_lib/follow-up.ts` so the acceptance criteria are unit-testable and the
+lead `lead_type` (`Sales | Nurture | None`) is what the n8n workflow branches
+on, never a recalculated disposition.
 
 ## Extra, beyond the brief
 
@@ -82,7 +114,7 @@ one devtools console away from being ignored.
   screen readers, a rem scale so an enlarged device font actually enlarges the
   page. For people over 40 who can't work, usually on a phone, often with a
   vision impairment, legibility and completion rate are the same variable.
-- **38 unit tests** over the four places a bug here is silent rather than loud —
+- **40 unit tests** over the four places a bug here is silent rather than loud —
   the compliance decision, CAPI normalization, the log redactor, the
   delivery-health thresholds — plus a Playwright suite checking the same
   invariants from the outside, including `eid` on the wire.
