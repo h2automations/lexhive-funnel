@@ -5,57 +5,30 @@ tracking and a delivery layer built so that a downstream outage cannot lose a
 lead.
 
 **Live funnel:** https://lexhive.vercel.app/qualification-v1
-**Ops view:** https://lexhive.vercel.app/ops
-**Project (Vercel):** lexhive-funnel
+**Delivery health:** https://lexhive.vercel.app/api/health *(unauthenticated, returns 200 healthy / 503 degraded)*
+**Ops view:** https://lexhive.vercel.app/ops *(needs `OPS_KEY`)*
 
 ---
 
-## Status
+## Where the deliverables are
 
-**Deployed to Vercel production** at `https://lexhive.vercel.app`.
-The build passes (`npm run build`), typechecks clean (`tsc --noEmit`), and both
-`/qualification-v1` and `/ops` return 200.
-
-| Status | Item |
+| Deliverable | Where |
 |---|---|
-| ✅ | Vercel production deployment |
-| ✅ | GTM container `GTM-P34XGVL3` — Meta Pixel and GA4 configured there, not in code |
-| ✅ | Supabase — `supabase/schema.sql` applied; `supabase/verify.sql` reports the live state of every object it creates |
-| ✅ | Server-side env vars on Vercel: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `META_PIXEL_ID`, `META_API_VERSION`, `META_CAPI_ACCESS_TOKEN`, `DRAIN_SECRET`, `OPS_KEY`, `PUBLIC_BASE_URL`, `N8N_WEBHOOK_URL`, `N8N_INTERNAL_SECRET`, `AIRTABLE_BASE_ID` |
-| ✅ | n8n `LexHive Outbox Drain` on a 60-second schedule, reading its config from Supabase rather than env vars |
-| ✅ | 40 unit tests + a 30-test Playwright suite |
-| ⬜ | `/api/health` and `n8n/lexhive-delivery-monitor.json` — written and committed, not yet deployed and activated |
-| ✅ | GTM container export committed into `gtm/` |
-| ⬜ | Meta Test Events screenshot (Browser + Server, deduplicated) — after the redeploy below |
+| The written note | [`SUBMISSION.md`](./SUBMISSION.md) — **start here** |
+| Loom script and what it demonstrates | [`docs/LOOM.md`](./docs/LOOM.md) |
+| Automation export | [`n8n/`](./n8n) — outbox drain, lead routing, delivery monitor |
+| Database export | [`supabase/schema.sql`](./supabase/schema.sql); [`supabase/verify.sql`](./supabase/verify.sql) reports the live state of every object it creates |
+| Tag configuration | [`gtm/GTM-P34XGVL3.json`](./gtm) — the full container export |
+| Tests | [`tests/README.md`](./tests/README.md) — 56 unit tests, 32 Playwright |
+| What this needs before real ad spend | [`PRODUCTION.md`](./PRODUCTION.md) |
 
-**Verification run, 9 September 2026** (pre-rewrite build). All three dispositions
-were driven end to end through a real browser and cross-checked in Meta Events
-Manager, Airtable and n8n: the browser `Lead` event carried the same `event_id`
-the server persisted, restricted leads reached neither a contact field nor a
-Meta optimisation event, and both Airtable tables received what they should.
-Meta's Test Events reporting at the time showed 8.0/10 match quality on `Lead`
-with browser and server both delivering. `PRODUCTION.md` §3 is what came of it.
-
-That run also found the outage this repository is now built around — the drain
-had never once executed. A note of caution about the paragraph above: it
-predates the UX-review rebuild. The current funnel (six questions, state asked
-second, knockout early-exit, phone-led contact) is **not** verified against
-production until the deployment below is done and the suite re-run.
-
-**To finish:** import and activate `n8n/lexhive-delivery-monitor.json` (its
-export now sets `alwaysOutputData` and continues on health-check errors so a
-degraded signal still alerts), activate the nurture branch of
-`n8n/lexhive-lead-routing.json` and create the `Nurture` Airtable table it
-writes to, and capture the Meta Test Events deduplication screenshot.
-
-The current build is deployed and the full Playwright suite is green against
-it. The rebuilt funnel (six questions, state asked second, knockout early-exit,
-phone-led contact, disqualified-opt-in nurture) is verified by the Playwright
-suite described in `tests/README.md`.
+Configuration that exists only inside someone's GTM, n8n or Supabase account is
+configuration nobody can review. That is why all four are exported into the
+repository rather than described in prose.
 
 ---
 
-## Architecture
+## The one decision
 
 ```
 Browser (React + Vite, Vercel)
@@ -65,7 +38,7 @@ POST /api/lead
    │  1. insert or update ONE lead row      ← durability boundary; returns here
    │  2. on completion, enqueue delivery_outbox rows
    ▼
-POST /api/drain  (triggered by n8n Schedule, every 60s)
+POST /api/drain  (n8n Schedule, every 60s)
    │  claim_outbox_batch() — FOR UPDATE SKIP LOCKED
    ├──► Meta Conversions API      dedup via shared event_id (Lead | NurtureOptIn)
    └──► n8n webhook ──► Airtable  upsert on Lead ID, Sales | Nurture | None
@@ -73,126 +46,119 @@ POST /api/drain  (triggered by n8n Schedule, every 60s)
              └─ failure ──► exponential backoff ──► dead-letter ──► /ops + Sentry
 ```
 
-The one decision everything else follows from: **the request is finished the
-moment Postgres commits.** Meta and Airtable are deliveries, not dependencies.
+**The request is finished the moment Postgres commits.** Meta and Airtable are
+deliveries, not dependencies. Everything else in this repository follows from
+that one sentence.
+
+There is one deliberate exception: a completed submission also runs a bounded
+four-second drain sweep before responding. Vercel can freeze an invocation the
+moment it returns, so work started after the response is not guaranteed to run.
+The person waits a moment rather than the delivery being silently dropped.
 
 ---
 
 ## Tracking quality
 
-**Tag management.** Every browser tag — Meta Pixel, GA4 —
-is configured in GTM container `GTM-P34XGVL3`. The app pushes four events to
-the dataLayer (`src/lib/datalayer.ts`) and the container decides who hears about
-them, so adding a vendor is a container change rather than a deploy. The
-container export belongs in `gtm/`, for the same reason the n8n workflows do:
-configuration that exists only in someone's account is configuration nobody can
-review. `docs/gtm-setup.md` has the tag-by-tag build.
+### Deduplication
 
-**Deduplication.** The funnel creates one stable submission UUID in the browser
-when the qualification session starts. That `submission_id` is sent to
-`/api/lead`, where the server:
-
-1. validates that it is a valid UUID,
-2. persists it in Supabase as the lead's `event_id`,
-3. re-reads the stored value from the database, and
-4. returns that persisted `event_id` to the browser.
-
-From that point onward, the database value is treated as authoritative. The same
-persisted `event_id` is used by both Meta delivery paths:
+One conversion, sent twice, counted once. The browser proposes a submission
+UUID; the database decides it.
 
 ```text
-Browser creates submission_id
-        ↓
-POST /api/lead
-        ↓
-Server validates UUID
-        ↓
-Supabase persists:
-submission_id = ABC123
-event_id      = ABC123
-        ↓
-Server returns stored event_id
-        ↓
-┌─────────────────────────┬─────────────────────────┐
-│ Browser / Meta Pixel    │ Server / Meta CAPI      │
-│                         │                         │
-│ event_name = Lead       │ event_name = Lead       │
-│ event_id   = ABC123     │ event_id   = ABC123     │
-└─────────────────────────┴─────────────────────────┘
-                 ↓
-        Meta deduplication
+Browser mints submission_id ──► POST /api/lead
+                                    │  validates it is a UUID
+                                    │  persists it as leads.event_id
+                                    │  re-reads the stored value
+                                    ▼
+                          returns the PERSISTED event_id
+                                    │
+        ┌───────────────────────────┴───────────────────────────┐
+        │ Browser / Meta Pixel              Server / Meta CAPI   │
+        │ event_name = Lead                 event_name = Lead    │
+        │ event_id   = ABC123               event_id   = ABC123  │
+        └───────────────────────────┬───────────────────────────┘
+                                    ▼
+                           Meta deduplication
 ```
 
-The browser does **not** generate a separate Meta event ID after submission, and
-the server does **not** create a second independent Meta event ID.
+The Pixel fires with what came back, not with what it sent. That distinction is
+the whole design: on a retry the second request finds the completed row and is
+handed the *first* attempt's id, so a person who submits twice still produces
+one conversion. Delivery retries reuse the same id too — it is written once into
+`delivery_outbox.payload` at enqueue and the failure path never rewrites it.
 
-For qualified leads, the browser receives the server-returned `eventId` and
-pushes it into the data layer with the `qualified_lead` event. GTM maps that
-value to the Meta Pixel `Lead` event's Event ID.
+With tags in GTM, the browser half of that contract is a single field: the Meta
+Pixel tag's **Event ID** must map to `{{DLV - event_id}}`. Unmapped, nothing
+looks wrong — no error, a green tick in Preview — and every conversion is
+counted twice. `tests/tags.spec.ts` asserts the `eid` parameter on the live wire
+for exactly that reason.
 
-The server-side Meta CAPI delivery reads the same persisted `event_id` from the
-lead/outbox data and sends:
+A second silent failure sits beside it: the browser gets its pixel id from the
+container and the server from `META_PIXEL_ID`. If those ever name different
+pixels, both events send, both return success, and they land in different places
+and never meet. `/api/health` publishes the server's id — it is public, it is in
+every visitor's page source — and the same test asserts the browser matches it.
+The live pixel is `3238075189714579`.
 
-```text
-event_name = Lead
-event_id   = <same persisted event_id>
-```
+### What the tags are not given
 
-Because the browser Pixel and server CAPI use the same `event_name` and
-`event_id`, Meta can recognize them as the same conversion and deduplicate them
-instead of counting two separate leads.
+The funnel asks whether someone is unable to work because of a medical
+condition, and Meta has classified this domain under its Business Tools Terms as
+associated with medical conditions. So the dataLayer carries the **step ordinal
+and nothing else** — never the answer, never the question's semantic id, since a
+variable reading `question: "doctor"` feeds the very classification that caused
+the flag. The drop-off curve is identical either way; semantic ids live in
+`app_events`, which is our database rather than an ad platform's.
 
-Retries also preserve the original persisted `event_id`; a new event ID is not
-generated for the same lead.
+Contact fields carry `data-clarity-mask` in the markup rather than relying on a
+session recorder's default masking, because a default is not a control. No tag
+fires on `/ops` — counting 2am debugging as campaign traffic distorts exactly
+the numbers spending decisions are made on.
 
-With tags in GTM the browser half of that is a field: the Meta Pixel tag's
-**Event ID** must map to `{{DLV - event_id}}`. Unmapped, nothing looks wrong —
-no error, a green tick in Preview — and every conversion is counted twice. That
-is the real cost of moving tags into a container, and it is why the mapping is
-the first thing `docs/gtm-setup.md` verifies.
+### Match keys and normalization
 
-**Identifiers sent.** `em`, `ph`, `fn`, `ln`, `st`, `zp`, `ge`, `country`, and
-`external_id`, each normalized before hashing; `client_ip_address`,
-`client_user_agent`, `fbp`, and `fbc` unhashed. `st` is the two-letter code
-lowercased and `zp` is the five-digit ZIP asked for on the contact step —
-Meta's normalization rules are exact, and a hash of `"New York"` matches
-nothing while failing with no error. `ct` (city) is **not** sent: the funnel
-does not collect a city, and filling the field with the state to have something
-there costs match quality rather than adding it.
+Sent hashed: `em`, `ph`, `fn`, `ln`, `st`, `zp`, `ge`, `country`, `external_id`,
+each normalized first. Sent unhashed, as Meta requires: `client_ip_address`,
+`client_user_agent`, `fbp`, `fbc`.
+
+Normalization is not cosmetic. `st` is the two-letter code lowercased and `zp`
+the five-digit ZIP: a hash of `"New York"` matches nothing and fails with no
+error. `ct` (city) is **not** sent — the funnel does not collect one, and
+filling the field with the state to have something there costs match quality
+rather than adding it.
 
 **`fbc` reconstruction.** When `_fbc` is absent but `fbclid` is in the URL, the
-value is rebuilt as `fb.<subdomain_index>.<first_seen_ms>.<fbclid>`, using the
+value is rebuilt as `fb.<subdomain_index>.<first_seen_ms>.<fbclid>` — using the
 session's first touch rather than the current time, and deriving the index from
-the hostname rather than hardcoding it — Meta writes `fb.2.…` on
-`lexhive.vercel.app`, and a constant `1` there is a near-miss that costs match
-quality without ever raising an error. This is the largest match-quality gain
-available in the funnel and is routinely missed, because the cookie only exists
-after the Pixel script loads — visitors who bounce, block scripts, or submit
-quickly never get one.
+the hostname rather than hardcoding it. Meta writes `fb.2.…` on
+`lexhive.vercel.app`, and a constant `1` is a near-miss that costs match quality
+without ever raising an error. This is the largest match-quality gain available
+here and is routinely missed, because the cookie only exists after the Pixel
+script loads — visitors who bounce, block scripts, or submit quickly never get
+one.
 
-**Attribution timing.** `fbclid`, UTMs, and referrer are captured on the first
-pageview and persisted. Capturing at submit is too late: the query string is
-gone after the first route change. Cookie identifiers are re-read at submit,
-since the Pixel often writes `_fbp` after first paint.
+**Attribution timing.** `fbclid`, UTMs and referrer are captured on the first
+pageview and persisted; the query string is gone after the first route change.
+Cookie identifiers are re-read at submit, since the Pixel often writes `_fbp`
+after first paint.
 
-**`event_time`.** The conversion moment from the lead row, not the moment the
+**`event_time`** is the conversion moment from the lead row, not the moment the
 delivery attempt runs. With a 32-minute backoff ceiling over six attempts, the
 difference is the wrong reporting hour at best and a missed attribution window
 at worst.
 
-**`external_id`.** A first-party session UUID, published on the dataLayer for
-the Pixel's advanced matching and sent hashed in `user_data` from the server. It survives cookie loss mid-funnel and
-costs nothing.
+**`external_id`** is a first-party session UUID, published on the dataLayer for
+the Pixel's advanced matching and sent hashed from the server. It survives
+cookie loss mid-funnel and costs nothing.
 
-**What the tags are not given** matters more than what they are. The funnel asks
-whether someone is unable to work because of a medical condition, so the
-dataLayer carries the **step ordinal and nothing else** — never the answer, and
-never the question's semantic id, since a variable reading `question: "doctor"`
-feeds the very classification that got this domain flagged by Meta. The drop-off
-curve is identical either way. Contact fields carry `data-clarity-mask` in the
-markup rather than relying on Clarity's default masking, because a default is
-not a control: it survives someone changing a dashboard setting without knowing
-what the form collects. No tag fires on `/ops`.
+### One conversion event, not two
+
+The app pushes `application_submitted` on every completion and `qualified_lead`
+only when the lead is actionable. Only the second becomes a Meta `Lead`. A
+browser-only `SubmitApplication` would have no CAPI half, nothing to
+deduplicate against, and would add a second conversion signal from a
+health-flagged domain. The gap between the two is measured in GA4 instead, where
+it is a product metric rather than an optimisation signal.
 
 ---
 
@@ -208,261 +174,136 @@ what the form collects. No tag fires on `/ops`.
 | 5-minute lease | Rows stuck in `delivering` self-release |
 | Jittered exponential backoff | 1m → 32m, no retry stampede |
 | `retryable` classification | Meta 4xx is dead on arrival; only 429/5xx retry |
-| Dead-letter + ops visibility | Bounded failure visible and replayable by a human |
-| `/ops` replay | Recovery is a button, not a database query |
+| Dead-letter + `/ops` replay | Bounded failure, visible and replayable by a human |
+| `/api/health` + monitor workflow | Liveness, progress and loss — three signals, not one |
 
-`attempts` is incremented in exactly one place — `claim_outbox_batch`. The
-worker reads it and never adds to it. Incrementing in both spends two attempts
-per failure and skips every other rung of the backoff ladder, which turns a
-six-attempt budget into three and is invisible until an outage runs long.
+`attempts` is incremented in exactly one place: `claim_outbox_batch`. The worker
+reads it and never adds to it. Incrementing in both spends two attempts per
+failure and skips every other rung of the backoff ladder, turning a six-attempt
+budget into three — invisible until an outage runs long.
+
+**The failure we actually had.** `PRODUCTION.md` predicted that a stopped drain
+was the most likely silent failure in this system. Then it happened: n8n blocks
+environment variables inside nodes, so the URL expression did not throw — it
+resolved to the literal string `[ERROR: access to env vars denied]` and the
+workflow POSTed to that every sixty seconds for a day. No error, no alert, ops
+page green, leads still arriving because the API also drains inline. The retry
+path simply did not exist.
+
+`/api/health` is what closes it, and it checks three things rather than one:
+is the drain running (heartbeat age), is it making progress (oldest waiting
+outbox row), and has anything been given up on (dead-lettered rows). Liveness
+alone would not have caught this — a drain that runs and fails every delivery
+keeps a perfectly fresh heartbeat. Config moved out of `$env` and into a
+Supabase `app_config` row, so rotating the drain secret is one `UPDATE`.
 
 **Progress saves.** Every answer updates the same lead row: the first save
-returns an id, and each later one sends it back. An abandoned funnel leaves one
-recoverable record with the step it stopped at, rather than one row per
-question inflating every count on `/ops` by a factor of six.
-
-**Delivery edge cases.** Three things that used to go wrong in the gap between
-"the event was delivered" and "the delivery is recorded", all now closed:
-
-- A worker that crashes mid-flight leaves a row `delivering`; when its lease
-  expires, the row is reclaimed **only if the attempt budget remains**. A row
-  already at `max_attempts` is dead-lettered at reclamation instead of being
-  reset to `pending` and looped through the budget forever.
-- Outcome writes (succeeded / dead / failed) are pinned to the lease and the
-  exact attempt number, so a stale worker cannot overwrite a newer worker's
-  result. If the outcome fails to persist, the row is counted **unresolved**
-  and redelivered rather than reported as a success.
-- The drain honours a wall-clock deadline (`DRAIN_DEADLINE_MS`, 25s default) so
-  a long batch returns before the n8n caller's 30s timeout and the unprocessed
-  tail stays leased for the next run.
+returns an id, each later one sends it back. An abandoned funnel leaves one
+recoverable record with the step it stopped at, rather than six rows inflating
+every count on `/ops`.
 
 ---
 
 ## Privacy and compliance
 
-- The restricted-state list lives in the `state_rules` table and is read on
-  every submission, so compliance changes it with an `UPDATE` and no deploy.
-  Nothing in the browser decides restriction — the client is told the
-  disposition by the server and renders accordingly.
+- The restricted-state list lives in `state_rules` and is read on every
+  submission, so compliance changes it with an `UPDATE` and no deploy. Nothing
+  in the browser decides restriction — a compliance rule enforced in client code
+  is one devtools console away from being ignored.
 - A `state_rules` lookup failure is treated as **restricted**. When the question
   is "may we pass this person's details to a buyer", the safe direction to fail
   in is obvious.
-- Restricted leads have contact fields dropped in `api/drain.ts` **and** again
-  in the n8n Code node before Airtable. Not an Airtable view: a view is a
-  display filter, and the data would still be in the base.
-- Restricted leads are sent to the Conversions API with Limited Data Use set.
-- Operational events carry IDs and status only—never a name, phone, or email.
-- `/ops` returns no personal data at all, and its key travels in a header — a
-  query parameter would put it in browser history, referrers, and access logs.
+- Restricted leads have contact fields stripped in `api/drain.ts` **and** again
+  in the n8n Code node before Airtable, and the Airtable `Restricted` table has
+  no contact columns at all — not a hidden view, the fields do not exist.
+- Restricted leads reach the Conversions API with Limited Data Use set.
 - The TCPA consent artifact stores the exact consent **text**, its version,
-  timestamp, IP, and user agent. A version number nobody can resolve back to
+  timestamp, IP and user agent. A version number nobody can resolve back to
   wording is not a consent record, and in legal lead gen the consent record is
   the product.
-- `outbox_health` is declared `security_invoker`, so the view obeys the
-  caller's permissions instead of its owner's and cannot be read past RLS with
-  the anon key.
+- Operational events and logs carry ids and status only. A redactor strips
+  forbidden keys at any depth from everything logged — a convention every call
+  site must remember is not a control. `api/_lib/log.test.ts` proves it,
+  including the realistic accident of logging a whole lead row.
+- `/ops` returns no personal data, and its key travels in a header; a query
+  parameter would put it in browser history, referrers and access logs.
 
 ---
 
 ## Design
 
 The audience is people over 40 who cannot work, arriving from a Meta ad on a
-phone, frequently with a vision, motor, or cognitive impairment. So the funnel
-uses 4rem targets, 1.125rem minimum body text, one question per screen, focus
-moved to each new question for screen reader users, and error states carried by
-shape as well as colour.
+phone, frequently with a vision, motor or cognitive impairment. So: 4rem touch
+targets, 1.125rem minimum body text, one question per screen, focus moved to
+each new question for screen readers, and errors carried by shape as well as
+colour. Every size is in `rem` under a `100%` root, so an enlarged device font
+actually enlarges the page — a px scale under a `100%` root is a comment, not a
+behaviour.
 
-Six questions, in this order: age, state, work, duration, work-history
-(20 of the last 40 quarters), doctor. State is asked second because availability
-is the first thing worth knowing — it is a native picker behind an explicit
-"Check availability" confirm, so an unsupported state ends early instead of
-after four more taps, and network failure shows "cannot check right now" rather
-than a fake verdict. A "No" on any knockout question exits to a distinct
-non-match screen that captures no contact details and fires no conversion event.
-Contact is phone-led: name and phone required, email and ZIP optional.
+For this audience legibility and completion rate are the same variable, so this
+is a conversion argument rather than a compliance checkbox.
 
-Every size is in `rem`. `html { font-size: 100% }` preserves the user's own font
-setting, but that only reaches the page if everything downstream is relative to
-it — a px-based scale under a `100%` root is a comment, not a behaviour.
-
-This is a conversion argument, not a taste one: for this audience, legibility
-and completion rate are the same variable.
-
----
-
-## Trade-offs and assumptions
-
-**Assumed** the funnel is a US Social Security disability offer, since the
-reference funnel is SSDI. Phone normalization assumes a US country code and
-drops anything that is not a valid ten-digit US number (with an optional leading 1).
-
-**Questions are a deliberate screening model, not an exact reproduction of the
-reference.** The reference's age range differs from this funnel's 18–64 range,
-and this funnel asks work history as the SSA 20-of-40-quarters rule ("20 of the
-last 40 quarters, roughly 5 of the last 10 years") rather than "20+ years of
-work". Both are choices for a legal-lead-gen screen, and both should be changed
-in `src/components/Funnel.tsx` if the offer's actual targeting differs. The
-reference also supplies branding, privacy and terms links on its entry page; the
-links here are deliberately light so they are not mistaken for a government
-site.
-
-**Contact capture placement.** I kept contact capture at the end, matching the
-reference funnel. Moving it one step earlier would enrich every subsequent event
-and capture identifiers on abandoned sessions, at some cost to completion rate.
-That is an A/B test, not an assumption — the variant plumbing is already in
-place to run it.
-
-**ZIP on the contact step.** One extra field, and it is a Meta match key that
-nobody questions on a benefits form. City would need a second field for less
-return, so it is not asked and not sent.
-
-**n8n Schedule instead of Vercel Cron.** Vercel's Hobby plan caps cron at once
-per day, which is useless for a 60-second retry loop. Using an n8n Schedule node
-turned out to be the better design anyway: the automation layer visibly
-orchestrates recovery instead of a hidden platform cron.
-
-**No router library.** Two routes do not justify the dependency.
-
-**Rate limiting.** `/api/lead` validates and bounds its input (variant pattern,
-answers size cap, field truncation) but is not rate limited — that needs a
-shared store, and the honest place for it is Vercel's WAF or an Upstash counter
-rather than something improvised in the handler.
-
-**Event Match Quality score.** EMQ needs live traffic over several days, so no
-real score exists yet. What is demonstrated is the input side: which identifiers
-are sent, correctly normalized, with browser/server deduplication confirmed in
-Test Events. In production I would poll the Dataset Quality API for match rate
-and alert when it drops below threshold.
-
-**Test event code.** `META_TEST_EVENT_CODE` routes events to the Test Events tab
-during evaluation. It must be **unset** in production or events never reach live
-reporting. Deduplication and match quality behave identically either way.
+Six questions: age, state, work, duration, work history (the SSA 20-of-40-
+quarters rule), doctor. State is asked **second** because availability is the
+first thing worth knowing — behind an explicit "Check availability" confirm, so
+an unsupported state ends early instead of after four more taps, and a network
+failure says "cannot check right now" rather than inventing a verdict. A "No" on
+any knockout question exits to a distinct non-match screen that captures no
+contact details and fires no conversion event, but does offer an explicit,
+separately-consented follow-up opt-in that routes to nurture — never to sales,
+and never as the qualified conversion.
 
 ---
 
-## Documentation map
+## Verifying it yourself
+
+```bash
+npm run verify      # typecheck + 56 unit tests + build
+npm run test:e2e    # 32 Playwright tests against the deployed funnel
+```
+
+The end-to-end suite drives the **live** site and writes real rows;
+[`tests/README.md`](./tests/README.md) covers configuration and what each suite
+proves. The two assertions worth reading are the `eid` check in
+`tests/tags.spec.ts` — the deduplication contract, on the wire — and the
+outbox/delivered payload checks in `tests/funnel.meta-capi.spec.ts`.
+
+```bash
+curl -s https://lexhive.vercel.app/api/health   # three delivery signals + the server's pixel id
+```
+
+**Running locally**
+
+```bash
+npm install
+npx vercel login    # once
+npm run dev         # vercel dev: the React app and the api/ functions together
+```
+
+Copy `.env.example` → `.env.local`. Only `VITE_`-prefixed variables reach the
+browser; anything carrying a credential stays server-side.
+
+---
+
+## Where the reasoning lives
 
 | File | What it is |
 |---|---|
-| [`SUBMISSION.md`](./SUBMISSION.md) | The one-page note: assumptions, trade-offs, extras. **Start here.** |
-| [`docs/gtm-setup.md`](./docs/gtm-setup.md) | The GTM container, tag by tag — including the one field the dedup depends on |
-| [`docs/setup-airtable-n8n.md`](./docs/setup-airtable-n8n.md) | Wiring the automation layer, and how to prove it end to end |
+| [`SUBMISSION.md`](./SUBMISSION.md) | Assumptions, trade-offs, known gaps |
+| [`docs/gtm-setup.md`](./docs/gtm-setup.md) | The container, tag by tag — including the field deduplication depends on |
+| [`docs/setup-airtable-n8n.md`](./docs/setup-airtable-n8n.md) | Wiring the automation layer and proving it end to end |
 | [`PRODUCTION.md`](./PRODUCTION.md) | What this needs before real ad spend, in priority order |
 | This file | How the system works and why |
 
 ---
 
-## Observability
-
-Three layers, because they answer different questions: structured JSON logs to a
-drain (`api/_lib/log.ts`), Sentry for exceptions (`api/_lib/sentry.ts`), and a
-`app_events` table in Postgres for the domain events `/ops` reports on
-(`api/_lib/events.ts`).
-
-No personal data reaches any of them. That is enforced by a redactor that strips
-forbidden keys at any depth from everything logged, not by a convention every
-call site has to remember — `api/_lib/log.test.ts` proves it, including the
-realistic accident of logging a whole lead row.
-
-`request_id` flows from the browser response header, through the log lines, onto
-the outbox row, and into the drain's logs, so a delivery that succeeds three
-retries later is still traceable to the submission that created it.
-
-**[PRODUCTION.md](./PRODUCTION.md)** covers what else this needs before it
-carries real ad spend, in the order I would do it — rate limiting and bot
-protection on the lead endpoint, real auth on `/ops`, a dead-man's switch on the
-drain, migrations, staging, CI, and a retention policy — plus what to alert on
-and at what threshold.
-
----
-
-## Running the checks
-
-```bash
-npm run typecheck   # tsc --noEmit
-npm test            # node:test, via esbuild
-npm run verify      # all of the above plus the build
-```
-
----
-
-## End-to-end tests (Playwright)
-
-A Playwright suite (`tests/funnel.e2e.spec.ts`) drives the **deployed** funnel
-at `BASE_URL` — every step, every API call, and the real `/api/lead` responses.
-Submissions write real rows to the production Postgres, and the test email is
-generated per run so nothing is reused.
-
-1. **Install the browser:**
-
-   ```bash
-   npx playwright install chromium
-   ```
-
-2. **Run the suite:**
-
-   ```bash
-   npm run test:e2e
-   ```
-
-3. **Headed mode** (watch it click):
-
-   ```bash
-   npm run test:e2e:headed
-   ```
-
-4. **Debug mode** (Playwright Inspector + step-by-step):
-
-   ```bash
-   npm run test:e2e:debug
-   ```
-
-Tests run serially in one worker — submissions share the production database and
-must not interleave. Retries are enabled only in CI; locally a flake fails
-loudly instead of hiding. Artifacts (screenshots, video, traces) are kept only
-for failures, under `test-results/` and `playwright-report/`.
-
-**Environment variables** (copy `.env.e2e.example` → `.env.e2e`; the real
-environment always wins):
-
-| Variable | Required | Purpose |
-|---|---|---|
-| `BASE_URL` | optional | Deployed funnel origin. Defaults to `https://lexhive.vercel.app` |
-| `OPS_KEY` | optional | Enables the authenticated `/ops` assertions. Empty ⇒ that part skips with a clear reason. **Never commit a real key** |
-| `E2E_FIRST_NAME` | optional | Test lead first name. Defaults to `Playwright` |
-| `E2E_LAST_NAME` | optional | Test lead last name. Defaults to `Test` |
-| `E2E_EMAIL` | optional | Stable test email. Absent ⇒ generated per run (`playwright+<ts>-<tag>@example.com`) |
-| `E2E_PHONE` | optional | Test phone. Absent ⇒ a clearly fictional US number (`5550100100`, reserved 555-01xx exchange) |
-| `E2E_ZIP` | optional | Test ZIP. Defaults to `78701` |
-
-Tests fail on any application-origin page error, console error, or non-2xx
-`/api/lead` response. Third-party noise (GTM, Meta Pixel, Clarity, extensions)
-is explicitly ignored per the documented network policy in
-`tests/funnel.e2e.spec.ts`; contact details are never logged and never appear in
-assertion diffs.
-
----
-
 ## What I would build next
 
-1. Dataset Quality API polling into the `/ops` view, with a Sentry alert when
-   match rate drops.
-2. Server-side GTM container so the Pixel is proxied first-party rather than
+1. Rate limiting and bot protection on `/api/lead`, and real auth on `/ops`.
+   Both are in `PRODUCTION.md` in priority order.
+2. Dataset Quality API polling into `/ops`, alerting when match rate drops.
+3. A server-side GTM container, so the Pixel is proxied first-party rather than
    loaded from `connect.facebook.net`.
-3. Step-level drop-off reporting from the partial rows, which is the number that
+4. Step-level drop-off reporting from the partial rows — the number that
    actually tells you which funnel variant to keep.
-4. A replay-all control on `/ops` for recovering a whole outage window at once.
-
----
-
-## Running locally
-
-```bash
-npm install        # installs dependencies (incl. vercel CLI as dev dep)
-npx vercel login   # once
-npm run dev        # = vercel dev: serves the React app AND the api/ functions together
-```
-
-Copy `.env.example` → `.env.local` and fill in the blanks. Only `VITE_`-prefixed
-variables reach the browser; anything containing credentials (Supabase key, Meta
-access token, webhook secrets) must stay server-side.
+5. A replay-all control on `/ops`, to recover a whole outage window at once.
