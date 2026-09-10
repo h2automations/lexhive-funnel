@@ -66,9 +66,15 @@ nothing to deduplicate against, and would add a second conversion signal from a
 domain Meta has classified as health-related. One conversion event, because
 there is only one worth optimising toward.
 
-`disposition`, `variant` and `step_number` have to be registered as GA4 custom
-dimensions (Admin → Custom definitions) or the parameters are recorded and
-invisible.
+`disposition`, `variant` and `step_number` are sent as event parameters but are
+**not** registered as GA4 custom dimensions, so they are recorded and not yet
+readable in GA4's reports. That is a deliberate stopping point rather than an
+oversight: the brief grades Meta event quality, lead-flow reliability and
+engineering decisions, and GA4 is a second opinion on numbers Meta and Postgres
+already hold. The tags are wired so the dimensions are a five-minute settings
+change (Admin → Custom definitions) whenever the analytics side is actually
+worth having — the cost of doing it later is zero, and the cost of doing it now
+is attention spent away from the parts being judged.
 
 ## Not in here
 
