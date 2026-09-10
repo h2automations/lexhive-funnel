@@ -81,9 +81,10 @@ matching the dataLayer key exactly:
 
 Custom Event triggers, one per dataLayer event:
 
-- `CE - funnel_ready` → event name `funnel_ready`
-- `CE - funnel_step` → event name `funnel_step`
-- `CE - lead_submitted` → event name `lead_submitted`
+- `CE - Qualification V1 Ready` → event name `funnel_ready`
+- `CE - Funnel Step` → event name `funnel_step`
+- `CE - Qualified Lead` → event name `qualified_lead`
+- `CE - Application Submitted` → event name `application_submitted`
 
 ## 3. Meta Pixel — the part that matters
 
@@ -93,21 +94,17 @@ Use the community **Facebook Pixel** template (Templates → Search Gallery).
 
 | Field | Value |
 |---|---|
-| Pixel ID | `3238075189714579` |
+| Pixel ID | `27653864700958179` |
 | Object Property Name / advanced matching | `external_id` = `{{DLV - external_id}}` |
-| Trigger | **`CE - funnel_ready`** |
+| Trigger | **`CE - Qualification V1 Ready`** |
 
-> **Check the ID against Events Manager before you paste it.** There are two
-> datasets in this account named `lexhive-assignment`. `3238075189714579`
-> (business: SEER Business) is the live one — it holds every Lead, arriving
-> from both the Pixel and the Conversions API, which is what Events Manager
-> labels *Integration: Multiple*. `27653864700958179` sits under a different ad
-> account, has never received a Lead, and is the one this document used to
-> name. Pointing the container at it would send browser conversions somewhere
-> the server never looks, with no error anywhere — the events keep sending, the
-> tags keep going green, and deduplication just stops. `/api/health` reports
-> `meta_pixel_id` and `tests/tags.spec.ts` asserts the browser matches it, so
-> the mistake is now catchable, but it is far cheaper not to make.
+> **This is the pixel that receives conversions** — browser and server send to
+> `27653864700958179`. There is a second dataset in this account named
+> `lexhive-assignment` (`3238075189714579`, business: SEER Business) that has
+> not received a Lead and is **not** the live one. The server reads its id from
+> `META_PIXEL_ID` on Vercel; `/api/health` reports `meta_pixel_id` and
+> `tests/tags.spec.ts` asserts the browser pixel matches it, so any drift
+> between the container and the server is now catchable.
 
 > Trigger this on `funnel_ready`, **not All Pages.** GTM loads before React
 > mounts, so an All Pages trigger fires before `external_id` exists and
@@ -121,18 +118,18 @@ Use the community **Facebook Pixel** template (Templates → Search Gallery).
 |---|---|
 | Event Name | `Lead` |
 | **Event ID** | **`{{DLV - event_id}}`** ← the whole design rests on this |
-| Trigger | `CE - lead_submitted` |
+| Trigger | `CE - Qualified Lead` |
 
-`/api/lead` mints `event_id`, stores it on the lead row, returns it to the
-browser, and the drain sends the same id to the Conversions API. Meta collapses
-the two into one conversion **only if this field is mapped.**
+`/api/lead` validates and persists the submission UUID as `event_id`, returns it
+to the browser, and the drain sends the same id to the Conversions API. Meta
+collapses the two into one conversion **only if this field is mapped.**
 
 If it isn't, nothing looks wrong: no error, no failed tag, a green tick in
 Preview mode — and every conversion is counted twice, which silently corrupts
 every optimisation decision downstream. Moving tags into a container traded
 code-enforced correctness for a form field, and this is the field.
 
-**Optional: `FunnelStep`** as a custom event on `CE - funnel_step`, with
+**Optional: `FunnelStep`** as a custom event on `CE - Funnel Step`, with
 `step_number`. Useful for drop-off audiences; it is not a standard event, so
 send it as a custom one.
 
@@ -141,8 +138,9 @@ send it as a custom one.
 | Tag | Type | Trigger | Parameters |
 |---|---|---|---|
 | GA4 Config | Google Tag, `G-Z5K86SX1QY` | Initialization – All Pages | — |
-| `funnel_step` | GA4 Event | `CE - funnel_step` | `step_number`, `variant` |
-| `generate_lead` | GA4 Event | `CE - lead_submitted` | `variant`, `disposition` |
+| `funnel_step` | GA4 Event | `CE - Funnel Step` | `step_number`, `variant` |
+| `generate_lead` | GA4 Event | `CE - Qualified Lead` | `variant`, `disposition` |
+| `application_submitted` | GA4 Event | `CE - Application Submitted` | `variant`, `disposition` |
 
 `generate_lead` is GA4's recommended name, so it works with the built-in
 reports rather than needing a custom conversion. **Send no `value`** — a lead's

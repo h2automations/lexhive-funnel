@@ -103,9 +103,9 @@ If a new event is genuinely needed, it belongs in `src/lib/datalayer.ts` as a
 dataLayer push and in this container as a tag — which is the whole reason the
 app publishes events rather than calling `fbq` itself.
 
-A related note: if Events Manager reports that pixel `27653864700958179` "wasn't
+A related note: if Events Manager reports that pixel `3238075189714579` "wasn't
 detected on this website", that is the correct answer, not a fault. That
 dataset is an abandoned duplicate under a different ad account and shares the
 name `lexhive-assignment` with the live one. The site fires
-`3238075189714579`; `/api/health` reports the server's id so the pair can be
+`27653864700958179`; `/api/health` reports the server's id so the pair can be
 compared from outside.
