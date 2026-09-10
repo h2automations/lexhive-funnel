@@ -1,6 +1,6 @@
 {
     "exportFormatVersion": 2,
-    "exportTime": "2026-09-10 06:59:39",
+    "exportTime": "2026-09-10 07:12:33",
     "containerVersion": {
         "path": "accounts/6375857172/containers/263605379/versions/0",
         "accountId": "6375857172",
@@ -99,7 +99,7 @@
                     {
                         "type": "TEMPLATE",
                         "key": "pixelId",
-                        "value": "27653864700958179"
+                        "value": "3238075189714579"
                     },
                     {
                         "type": "BOOLEAN",
@@ -127,7 +127,7 @@
                         "value": "true"
                     }
                 ],
-                "fingerprint": "1789023522268",
+                "fingerprint": "1789024293859",
                 "firingTriggerId": [
                     "6"
                 ],
@@ -195,7 +195,7 @@
                     {
                         "type": "TEMPLATE",
                         "key": "pixelId",
-                        "value": "27653864700958179"
+                        "value": "3238075189714579"
                     },
                     {
                         "type": "BOOLEAN",
@@ -228,7 +228,7 @@
                         "value": "true"
                     }
                 ],
-                "fingerprint": "1789023547341",
+                "fingerprint": "1789024303168",
                 "firingTriggerId": [
                     "6"
                 ],
@@ -296,7 +296,7 @@
                     {
                         "type": "TEMPLATE",
                         "key": "pixelId",
-                        "value": "27653864700958179"
+                        "value": "3238075189714579"
                     },
                     {
                         "type": "LIST",
@@ -350,7 +350,7 @@
                         "value": "true"
                     }
                 ],
-                "fingerprint": "1789023530813",
+                "fingerprint": "1789024284320",
                 "firingTriggerId": [
                     "9"
                 ],
@@ -428,7 +428,7 @@
                     {
                         "type": "TEMPLATE",
                         "key": "pixelId",
-                        "value": "27653864700958179"
+                        "value": "3238075189714579"
                     },
                     {
                         "type": "BOOLEAN",
@@ -456,7 +456,7 @@
                         "value": "true"
                     }
                 ],
-                "fingerprint": "1789023558091",
+                "fingerprint": "1789024313400",
                 "firingTriggerId": [
                     "12"
                 ],
@@ -996,7 +996,7 @@
                 "name": "Analytics Session ID"
             }
         ],
-        "fingerprint": "1789023579059",
+        "fingerprint": "1789024353324",
         "tagManagerUrl": "https://tagmanager.google.com/#/versions/accounts/6375857172/containers/263605379/versions/0?apiLink=version",
         "customTemplate": [
             {

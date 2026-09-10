@@ -94,14 +94,12 @@ Use the community **Facebook Pixel** template (Templates → Search Gallery).
 
 | Field | Value |
 |---|---|
-| Pixel ID | `27653864700958179` |
+| Pixel ID | `3238075189714579` |
 | Object Property Name / advanced matching | `external_id` = `{{DLV - external_id}}` |
 | Trigger | **`CE - Qualification V1 Ready`** |
 
 > **This is the pixel that receives conversions** — browser and server send to
-> `27653864700958179`. There is a second dataset in this account named
-> `lexhive-assignment` (`3238075189714579`, business: SEER Business) that has
-> not received a Lead and is **not** the live one. The server reads its id from
+> `3238075189714579`. The server reads its id from
 > `META_PIXEL_ID` on Vercel; `/api/health` reports `meta_pixel_id` and
 > `tests/tags.spec.ts` asserts the browser pixel matches it, so any drift
 > between the container and the server is now catchable.
