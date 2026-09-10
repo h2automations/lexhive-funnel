@@ -8,7 +8,9 @@ in `SUBMISSION.md`.
 Open these tabs before recording, in this order:
 
 1. `https://lexhive.vercel.app/qualification-v1`
-2. Events Manager → Test Events (browser test session already started)
+2. Events Manager → **dataset `3238075189714579`** (SEER Business) → Test
+   Events, browser test session already started. Check the ID: there is a
+   second, empty dataset with the same name under a different ad account.
 3. Airtable — Leads, with the Restricted tab visible
 4. n8n → LexHive Outbox Drain → Executions
 5. `https://lexhive.vercel.app/api/health`
@@ -66,7 +68,9 @@ input.
 
 Events Manager, Lead event.
 
-> "Match quality 8.0. Browser and server both reporting."
+> "Match quality 9.3 on Lead. Browser and server both reporting — Meta
+> labels that Integration: Multiple, which is the product telling you
+> deduplication is working."
 
 Open Test Events. Point at the single deduplicated Lead.
 
@@ -78,6 +82,15 @@ Open Test Events. Point at the single deduplicated Lead.
 > request finds the completed row and gets the first one's ID back, so a person
 > who submits twice still produces one conversion."
 
+Point at `/api/health` in the other tab for three seconds:
+
+> "One more thing that can break this and produce no error anywhere: the
+> browser gets its pixel from the tag container, the server from an environment
+> variable. If those ever name different pixels, both events send, both return
+> success, and they land in different places and never meet. The health
+> endpoint publishes the server's — it's public, it's in every visitor's page
+> source — and the test suite asserts the browser matches it."
+
 Then:
 
 > "Two decisions worth naming. Event time is the conversion moment, not the
@@ -88,7 +101,7 @@ Then:
 > browser events carry a step ordinal and nothing else: not the answer, not the
 > question's ID. Same drop-off curve, no health signal leaving the building."
 
-## 3:15 — 3:55 · n8n → Airtable
+## 3:15 — 3:45 · n8n → Airtable
 
 n8n execution, then Airtable.
 
@@ -102,7 +115,7 @@ Switch to the Restricted table. Scroll the columns.
 > exist. If it's a filter, it's one click from being undone by anyone with
 > access."
 
-## 3:55 — 4:45 · The failure we actually had
+## 3:45 — 4:30 · The failure we actually had
 
 This is the beat worth rehearsing.
 
@@ -133,7 +146,7 @@ Wait for the next drain tick, refresh, 200.
 
 > "And it heals itself, because the next successful drain stamps it again."
 
-## 4:15 — 4:40 · Disqualified is a decision, not a default
+## 4:30 — 4:50 · Disqualified is a decision, not a default
 
 New session, Texas, "No" on the work question.
 
@@ -145,12 +158,12 @@ New session, Texas, "No" on the work question.
 > outranks everything: the contact is stripped server-side whatever the browser
 > claims, and its row enqueues nothing."
 
-## 4:40 — 4:55 · Close
+## 4:50 — 5:00 · Close
 
 > "Config's in Supabase rather than env vars, so rotating the drain secret is
-> one UPDATE. Fifty-one unit tests over the places a bug here is silent rather
-> than loud, and a Playwright suite that checks the same invariants from the
-> outside — including whether the event ID is actually on the wire, because
+> one UPDATE. Fifty-six unit tests over the places a bug here is silent rather
+> than loud, and thirty-two Playwright tests checking the same invariants from
+> the outside — including whether the event ID is actually on the wire, because
 > that's a GTM field that fails with a green tick.
 >
 > Next two things I'd do: rate limiting on the public endpoint, and real auth on
@@ -163,9 +176,13 @@ New session, Texas, "No" on the work question.
 Don't demo the ops page. It duplicates what `/api/health` already showed and
 costs forty seconds you need elsewhere.
 
+Drive the funnel on a narrow window if you can. It is built mobile-first for an
+audience that arrives on a phone, and a 1500px-wide browser is the one view
+that makes the design look like it was not thought about.
+
 If you overrun, cut §3:15 to fifteen seconds — one sentence over the Airtable
-row — and §4:15 (disqualified/nurture) to a single spoken sentence over the
-choice screen. Do not cut §3:55. The incident is the most senior thing in this
+row — and §4:30 (disqualified/nurture) to a single spoken sentence over the
+choice screen. Do not cut §3:45. The incident is the most senior thing in this
 submission: a prediction, a real failure, and the mechanism that closes it.
 
 Say "I don't know" if asked something you don't. It reads better than a guess,
