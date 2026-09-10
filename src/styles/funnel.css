@@ -1,70 +1,282 @@
-/*
- * Foundation: every size below is in rem, deliberately.
- *
- * `html { font-size: 100% }` keeps the user's own browser/device font setting
- * as the root — but that only reaches the page if everything downstream is
- * relative to it. The previous version set `font-size: 100%` here and then
- * specified every element in px, so a user who had enlarged their text got
- * exactly nothing. For an audience of people over 40 with vision impairment,
- * that is the whole accessibility story in one property.
- */
+/* ==========================================================================
+   LexHive funnel — visual system
+   ==========================================================================
+
+   Design tokens first, everything else derived. No colour, radius or spacing
+   value appears twice below; if it does, it should have been a token.
+
+   Two constraints shape every decision here, and they pull in the same
+   direction more often than you would expect:
+
+   1. The audience is people over 40 who cannot work, arriving from a Meta ad
+      on a phone, frequently with a vision, motor or cognitive impairment. For
+      them legibility and completion rate are the same variable. Hence the
+      generous type scale, the 4rem targets, and every size in rem so that an
+      enlarged device font actually enlarges the page.
+
+   2. This is legal lead generation. The page has to look like something a
+      person in financial difficulty would hand a phone number to.
+
+   On colour: the reference funnel runs a full-bleed saturated violet header
+   and violet answer buttons. That reads as advertising. The accent here is a
+   desaturated indigo-violet spent in four small places — the logo tile, the
+   primary button, the progress fill, the focus ring — against warm neutrals.
+   The page should feel calm. The only thing competing for attention is the
+   question.
+
+   Type is the system stack rather than a web font. On iOS that is SF Pro, on
+   Android Roboto: both excellent, both already on the device. A web font
+   would cost a render-blocking request on 4G at the exact moment a paid click
+   is deciding whether to stay.
+   ========================================================================== */
+
+:root {
+  /* --- Accent (spent sparingly, on purpose) ----------------------------- */
+  --accent:       #4c4585;
+  --accent-deep:  #3a3468;
+  --accent-tint:  #f2f1f8;
+  --accent-edge:  #d8d5e8;
+
+  /* --- Neutrals --------------------------------------------------------- */
+  --canvas:       #f7f6f3;   /* warm off-white, not grey */
+  --surface:      #ffffff;
+  --ink:          #1c1a26;
+  --ink-soft:     #46425a;
+  --ink-mute:     #6f6a80;
+  --line:         #e6e3ec;
+  --line-strong:  #cfcada;
+
+  /* --- Semantic. Muted: these sit side by side and must not shout. ------- */
+  --go:           #2e6b4f;
+  --go-tint:      #edf4f0;
+  --stop:         #9e3b4e;
+  --stop-tint:    #f9f0f2;
+
+  /* --- Type scale ------------------------------------------------------- */
+  --t-xs:   0.8125rem;
+  --t-sm:   0.9375rem;
+  --t-base: 1.125rem;
+  --t-lg:   1.25rem;
+  --t-xl:   1.5rem;
+  --t-2xl:  1.875rem;
+
+  /* --- Space (8pt grid) ------------------------------------------------- */
+  --s-1: 0.25rem;  --s-2: 0.5rem;   --s-3: 0.75rem;  --s-4: 1rem;
+  --s-5: 1.25rem;  --s-6: 1.5rem;   --s-8: 2rem;     --s-10: 2.5rem;
+
+  /* --- Shape ------------------------------------------------------------ */
+  --r-sm:   0.5rem;
+  --r-md:   0.75rem;
+  --r-lg:   1.125rem;
+  --r-pill: 999px;
+
+  --shadow-card: 0 1px 2px rgba(28, 26, 38, 0.04), 0 8px 24px rgba(28, 26, 38, 0.05);
+  --shadow-btn:  0 1px 2px rgba(28, 26, 38, 0.10), 0 4px 12px rgba(28, 26, 38, 0.08);
+
+  /* The number the whole touch-target promise rests on. */
+  --target: 4rem;
+  --measure: 34rem;
+}
+
+/* ==========================================================================
+   1. Foundation
+   ========================================================================== */
+
 html {
+  /* The user's own browser font size stays the root. Every size in this file
+     is relative to it, so "Larger Text" in iOS settings enlarges the whole
+     page rather than nothing at all. */
   font-size: 100%;
   -webkit-text-size-adjust: 100%;
 }
 
-* {
+*,
+*::before,
+*::after {
   box-sizing: border-box;
 }
 
 body {
   margin: 0;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-  font-size: 1.125rem; /* 18px at default root */
-  line-height: 1.5;
-  color: #1a202c;
-  background: #f7fafc;
+  font-size: var(--t-base);
+  line-height: 1.55;
+  color: var(--ink);
+  background: var(--canvas);
+  -webkit-font-smoothing: antialiased;
 }
 
 h1 {
-  font-size: 1.625rem;
-  line-height: 1.3;
-  margin: 0 0 1rem;
+  font-size: var(--t-xl);
+  line-height: 1.25;
+  letter-spacing: -0.018em;
+  font-weight: 700;
+  margin: 0 0 var(--s-6);
+  text-wrap: balance;
 }
 
 h1:focus,
 h1:focus-visible {
-  /* Focus is moved here for screen readers; don't draw a box around it. */
+  /* Focus lands here on every screen change so a screen reader starts on the
+     new question. Visually silent — the heading is already what changed. */
   outline: none;
 }
 
-/* 4rem minimum touch targets for motor-impaired users. */
+/* One focus treatment everywhere, so a keyboard user gets the same
+   affordance on every control. */
+:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 3px;
+  border-radius: var(--r-sm);
+}
+
+/* 4rem minimum on anything you have to hit. A target a person with a tremor
+   misses is a person who does not finish the funnel. */
 button,
 .option,
 .btn,
-.input,
-.link {
-  min-height: 4rem;
+.input {
+  min-height: var(--target);
 }
+
+/* ==========================================================================
+   2. Shell
+   ========================================================================== */
 
 .funnel {
   min-height: 100vh;
+  min-height: 100dvh;
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
-  padding: 1.5rem 1rem;
+  padding: var(--s-6) var(--s-4) calc(var(--s-10) + env(safe-area-inset-bottom, 0px));
 }
 
-.funnel-card {
-  max-width: 35rem;
-  width: 100%;
-  background: #fff;
-  border: 1px solid #e2e8f0;
-  border-radius: 1rem;
-  padding: 2rem;
-  box-shadow: 0 0.25rem 0.75rem rgba(0, 0, 0, 0.06);
+.funnel.done {
+  justify-content: center;
 }
+
+/* --- Header ------------------------------------------------------------- */
+
+.brand {
+  width: 100%;
+  max-width: var(--measure);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-2) var(--s-3);
+  padding-bottom: var(--s-6);
+}
+
+.brand-name {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-3);
+  font-size: var(--t-lg);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--ink);
+}
+
+/* The logo mark. A tile rather than an image: one shape, no request, and it
+   inherits the accent so there is a single place to change the brand. */
+.brand-name::before {
+  content: 'LH';
+  display: grid;
+  place-items: center;
+  width: 2.125rem;
+  height: 2.125rem;
+  border-radius: var(--r-sm);
+  background: var(--accent);
+  color: #fff;
+  font-size: var(--t-sm);
+  font-weight: 800;
+  letter-spacing: 0.02em;
+}
+
+/* The tagline and intro are pushed after the logo/privacy pair in flex order,
+   so row one is logo-left / privacy-right and the copy sits underneath — the
+   shape of a header people already know how to read. Without this the tagline
+   claims the full width first and strands the privacy link on a row of its
+   own. */
+.brand-tag {
+  order: 1;
+  flex: 1 1 100%;
+  font-size: var(--t-sm);
+  color: var(--ink-soft);
+}
+
+.brand-intro {
+  order: 2;
+  flex: 1 1 100%;
+  font-size: var(--t-xs);
+  color: var(--ink-mute);
+}
+
+.brand-privacy {
+  margin-left: auto;
+  font-size: var(--t-xs);
+  font-weight: 600;
+  color: var(--ink-mute);
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+  white-space: nowrap;
+}
+
+.brand-privacy:hover {
+  color: var(--accent);
+}
+
+/* --- Progress ----------------------------------------------------------- */
+
+.progress {
+  width: 100%;
+  max-width: var(--measure);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  margin-bottom: var(--s-5);
+}
+
+.progress-track {
+  height: 0.375rem;
+  background: var(--line);
+  border-radius: var(--r-pill);
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: var(--r-pill);
+  transition: width 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Worded, not a percentage: "Question 2 of 6" is honest and branch-aware,
+   and it is the number that decides whether someone keeps going. */
+.progress-label {
+  font-size: var(--t-xs);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-mute);
+}
+
+/* --- Card --------------------------------------------------------------- */
+
+.funnel-card {
+  width: 100%;
+  max-width: var(--measure);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  padding: var(--s-8);
+  box-shadow: var(--shadow-card);
+}
+
+/* ==========================================================================
+   3. Answers
+   ========================================================================== */
 
 fieldset {
   border: none;
@@ -72,173 +284,391 @@ fieldset {
   margin: 0;
 }
 
-/* Answer options */
 .options {
   display: grid;
-  gap: 0.75rem;
+  gap: var(--s-3);
 }
 
-/* The state question has 51 options; cap the height so the Back link and the
-   progress bar stay reachable without a long scroll. */
+/* Two-choice questions get the card treatment: an icon carries the meaning
+   before the word is read, which matters at arm's length on a phone in
+   bright light. */
+.options-binary {
+  grid-template-columns: 1fr 1fr;
+  gap: var(--s-4);
+}
+
+/* A long option list is capped so Back stays reachable without a scroll. */
 .options-list {
   max-height: 55vh;
   overflow-y: auto;
-  padding-right: 0.25rem;
+  padding-right: var(--s-1);
+  -webkit-overflow-scrolling: touch;
 }
 
 .option {
-  font-size: 1.125rem;
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  width: 100%;
+  font: inherit;
+  font-size: var(--t-base);
   font-weight: 600;
   text-align: left;
-  padding: 1rem 1.25rem;
-  border-radius: 0.75rem;
-  border: 2px solid #cbd5e0;
-  background: #fff;
-  color: #1a202c;
+  padding: var(--s-4) var(--s-5);
+  border-radius: var(--r-md);
+  border: 1.5px solid var(--line-strong);
+  background: var(--surface);
+  color: var(--ink);
   cursor: pointer;
+  transition: border-color 0.15s, background 0.15s, transform 0.1s;
 }
 
-.option:hover,
-.option:focus-visible {
-  border-color: #2b6cb0;
-  background: #ebf4ff;
-  outline: none;
+.option:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--accent-tint);
 }
 
-/* Progress */
-.progress {
-  width: 100%;
-  max-width: 35rem;
-  height: 0.5rem;
-  background: #e2e8f0;
-  border-radius: 999px;
-  margin-bottom: 1.5rem;
-  overflow: hidden;
+.option:active:not(:disabled) {
+  transform: translateY(1px);
 }
 
-.progress-fill {
-  height: 100%;
-  background: #2b6cb0;
-  transition: width 0.3s ease;
+.option.selected {
+  border-color: var(--accent);
+  background: var(--accent-tint);
+  color: var(--accent-deep);
 }
 
-/* Form */
+.option:disabled {
+  opacity: 0.55;
+  cursor: progress;
+}
+
+/* Trailing chevron on list answers — says "this moves you forward" without
+   spending a word on it. */
+.option-arrow {
+  margin-left: auto;
+  flex: 0 0 auto;
+  color: var(--line-strong);
+  transition: color 0.15s, transform 0.15s;
+}
+
+.option:hover:not(:disabled) .option-arrow,
+.option.selected .option-arrow {
+  color: var(--accent);
+  transform: translateX(2px);
+}
+
+/* --- Binary cards ------------------------------------------------------- */
+
+.option-card {
+  flex-direction: column;
+  justify-content: center;
+  gap: var(--s-3);
+  min-height: 8.5rem;
+  padding: var(--s-5) var(--s-3);
+  text-align: center;
+  font-size: var(--t-lg);
+  font-weight: 700;
+}
+
+.option-icon {
+  display: grid;
+  place-items: center;
+  width: 3rem;
+  height: 3rem;
+  border-radius: var(--r-pill);
+  flex: 0 0 auto;
+}
+
+.option-icon--go   { background: var(--go-tint);   color: var(--go); }
+.option-icon--stop { background: var(--stop-tint); color: var(--stop); }
+
+/* ==========================================================================
+   4. Fields
+   ========================================================================== */
+
 form {
   display: grid;
-  gap: 0.75rem;
+  gap: var(--s-4);
 }
 
-form label {
-  font-size: 1rem;
-  font-weight: 600;
+form label,
+fieldset > label {
+  display: block;
+  margin-bottom: var(--s-2);
+  font-size: var(--t-sm);
+  font-weight: 700;
+  color: var(--ink-soft);
 }
 
 .input {
-  font-size: 1.125rem;
-  padding: 0.875rem 1rem;
-  border-radius: 0.75rem;
-  border: 2px solid #cbd5e0;
-  background: #fff;
   width: 100%;
+  font: inherit;
+  font-size: var(--t-base);
+  padding: var(--s-4);
+  border-radius: var(--r-md);
+  border: 1.5px solid var(--line-strong);
+  background: var(--surface);
+  color: var(--ink);
+}
+
+.input::placeholder {
+  color: var(--ink-mute);
+}
+
+.input:hover:not(:disabled) {
+  border-color: var(--accent-edge);
 }
 
 .input:focus-visible {
-  border-color: #2b6cb0;
+  border-color: var(--accent);
   outline: none;
-  box-shadow: 0 0 0 0.1875rem rgba(43, 108, 176, 0.2);
+  box-shadow: 0 0 0 4px var(--accent-tint);
 }
 
-.note {
-  background: #ebf8ff;
-  border-left: 0.25rem solid #2b6cb0;
-  padding: 0.75rem 1rem;
-  border-radius: 0.5rem;
-  font-size: 1rem;
-  margin: 0 0 1rem;
+.input[aria-invalid='true'] {
+  border-color: var(--stop);
+  background: var(--stop-tint);
 }
+
+.input:disabled {
+  background: var(--canvas);
+  color: var(--ink-mute);
+  cursor: progress;
+}
+
+/* The state picker. A native select on mobile opens the OS wheel, which is
+   far easier to operate with a tremor than fifty-one tap targets. */
+select.input {
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 24 24' fill='none' stroke='%236f6a80' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right var(--s-4) center;
+  padding-right: var(--s-10);
+  cursor: pointer;
+}
+
+/* ==========================================================================
+   5. Messages
+   ========================================================================== */
+
+/* Explanatory note. The icon comes from a pseudo-element so the meaning is
+   carried by shape as well as colour — it survives a greyscale screen — with
+   no extra markup to keep in sync. */
+.note {
+  display: flex;
+  gap: var(--s-3);
+  align-items: flex-start;
+  background: var(--canvas);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  padding: var(--s-4);
+  border-radius: var(--r-md);
+  font-size: var(--t-sm);
+  line-height: 1.6;
+  color: var(--ink-soft);
+  margin: 0 0 var(--s-6);
+}
+
+.note::before {
+  content: '';
+  flex: 0 0 auto;
+  width: 1.25rem;
+  height: 1.25rem;
+  margin-top: 0.125rem;
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%234c4585' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='9'/%3E%3Cpath d='M12 11v5M12 8h.01'/%3E%3C/svg%3E") center / contain no-repeat;
+}
+
+/* Errors carry border, background, weight and an icon, so they survive both
+   colour blindness and a greyscale screen. */
+.error {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  color: var(--stop);
+  font-weight: 600;
+  font-size: var(--t-sm);
+  border: 1.5px solid var(--stop);
+  border-radius: var(--r-md);
+  padding: var(--s-3) var(--s-4);
+  margin: var(--s-2) 0 0;
+  background: var(--stop-tint);
+}
+
+.error::before {
+  content: '';
+  flex: 0 0 auto;
+  width: 1.25rem;
+  height: 1.25rem;
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%239e3b4e' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='9'/%3E%3Cpath d='M12 8v4.5M12 16h.01'/%3E%3C/svg%3E") center / contain no-repeat;
+}
+
+/* ==========================================================================
+   6. Consent and actions
+   ========================================================================== */
 
 .consent {
   display: flex;
   align-items: flex-start;
-  gap: 0.75rem;
-  margin-top: 0.5rem;
+  gap: var(--s-3);
+  padding: var(--s-4);
+  background: var(--canvas);
+  border-radius: var(--r-md);
 }
 
 .consent input {
-  width: 2.5rem;
-  height: 2.5rem;
-  min-height: 2.5rem;
+  width: 1.75rem;
+  height: 1.75rem;
+  min-height: 1.75rem;
   flex: 0 0 auto;
-  margin-top: 0.125rem;
-  accent-color: #2b6cb0;
+  margin: 0.125rem 0 0;
+  accent-color: var(--accent);
+  cursor: pointer;
 }
 
 .consent label {
   min-height: auto;
-  font-weight: normal;
-  font-size: 1rem;
-  /* Padding gives the label itself a large hit area, so the pair clears the
-     4rem target even though the box alone is 2.5rem. */
-  padding: 0.5rem 0;
+  margin: 0;
+  font-size: var(--t-sm);
+  font-weight: 400;
+  line-height: 1.55;
+  color: var(--ink-soft);
+  /* Padding gives the label a large hit area, so the pair clears the target
+     minimum even though the box itself is 1.75rem. */
+  padding: var(--s-2) 0;
   cursor: pointer;
 }
 
 .btn {
-  font-size: 1.125rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s-2);
+  width: 100%;
+  font: inherit;
+  font-size: var(--t-lg);
   font-weight: 700;
-  padding: 1rem;
-  border-radius: 0.75rem;
+  letter-spacing: 0.01em;
+  padding: var(--s-4) var(--s-6);
+  margin-top: var(--s-2);
+  border-radius: var(--r-md);
   border: none;
-  background: #2b6cb0;
+  background: var(--accent);
   color: #fff;
   cursor: pointer;
-  margin-top: 0.5rem;
+  box-shadow: var(--shadow-btn);
+  transition: background 0.15s, transform 0.1s, box-shadow 0.15s;
 }
 
-.btn:hover:not(:disabled),
-.btn:focus-visible {
-  background: #2c5282;
-  outline: none;
+.btn:hover:not(:disabled) {
+  background: var(--accent-deep);
+}
+
+.btn:active:not(:disabled) {
+  transform: translateY(1px);
+  box-shadow: 0 1px 2px rgba(28, 26, 38, 0.12);
 }
 
 .btn:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
+  background: var(--ink-mute);
+  box-shadow: none;
+  cursor: progress;
 }
 
 .link {
   display: inline-flex;
   align-items: center;
+  gap: var(--s-2);
+  min-height: 3rem;
+  margin-top: var(--s-6);
+  padding: 0;
   background: none;
   border: none;
-  color: #2b6cb0;
-  font-size: 1.125rem;
-  text-decoration: underline;
-  cursor: pointer;
-  margin-top: 1rem;
-  padding: 0;
-}
-
-/*
- * Errors are carried by shape as well as colour — border, background and
- * weight — so they survive both colour blindness and a greyscale screen.
- */
-.error {
-  color: #c53030;
+  font: inherit;
+  font-size: var(--t-base);
   font-weight: 600;
-  border: 2px solid #c53030;
-  border-radius: 0.75rem;
-  padding: 0.75rem 1rem;
+  color: var(--ink-mute);
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.link:hover:not(:disabled) {
+  color: var(--accent);
+}
+
+.link:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Inline links inside body copy keep the underline — a link in a sentence
+   needs to look like one. */
+p .link {
+  display: inline;
+  min-height: 0;
   margin: 0;
-  background: #fff5f5;
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
 }
 
-/* Done screen */
-.funnel.done {
+/* ==========================================================================
+   7. Done screens
+   ========================================================================== */
+
+.funnel.done .funnel-card {
   text-align: center;
+  padding: var(--s-10) var(--s-8);
 }
 
-/* Utilities */
+/* The completion mark, as a pseudo-element so no screen has to remember to
+   render it. */
+.funnel.done:not(.exit) .funnel-card::before {
+  content: '';
+  display: block;
+  width: 4rem;
+  height: 4rem;
+  margin: 0 auto var(--s-6);
+  border-radius: var(--r-pill);
+  background: var(--go-tint) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%232e6b4f' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 6 9 17l-5-5'/%3E%3C/svg%3E") center / 2rem no-repeat;
+}
+
+/* The knockout screen is a done screen structurally but not emotionally. It
+   gets a neutral information mark in the accent, never the green tick — a
+   celebration over "may not be a match" reads as a bug. */
+.funnel.done.exit .funnel-card::before {
+  content: '';
+  display: block;
+  width: 4rem;
+  height: 4rem;
+  margin: 0 auto var(--s-6);
+  border-radius: var(--r-pill);
+  background: var(--accent-tint) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%234c4585' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='9'/%3E%3Cpath d='M12 11v5M12 8h.01'/%3E%3C/svg%3E") center / 2rem no-repeat;
+}
+
+.funnel.done .link {
+  text-decoration: underline;
+  text-underline-offset: 0.25em;
+}
+
+.funnel.done h1 {
+  margin-bottom: var(--s-3);
+}
+
+.funnel.done p {
+  margin: 0 0 var(--s-3);
+  font-size: var(--t-base);
+  color: var(--ink-soft);
+}
+
+.funnel.done p:last-child {
+  margin-bottom: 0;
+}
+
+/* ==========================================================================
+   8. Utilities
+   ========================================================================== */
+
 .sr-only {
   position: absolute;
   width: 1px;
@@ -248,4 +678,99 @@ form label {
   clip: rect(0, 0, 0, 0);
   white-space: nowrap;
   border: 0;
+}
+
+/* ==========================================================================
+   9. Privacy page
+   ========================================================================== */
+
+.privacy-card {
+  width: 100%;
+  max-width: 40rem;
+  margin: 0 auto;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  padding: var(--s-8);
+  box-shadow: var(--shadow-card);
+}
+
+.privacy-card .lead {
+  font-size: var(--t-base);
+  color: var(--ink-soft);
+}
+
+.privacy-card h2 {
+  font-size: var(--t-lg);
+  margin: var(--s-8) 0 var(--s-3);
+}
+
+.privacy-card li {
+  margin: var(--s-1) 0;
+}
+
+.privacy-card code {
+  font-size: 0.875em;
+  background: var(--accent-tint);
+  color: var(--accent-deep);
+  padding: 0.05rem 0.3rem;
+  border-radius: var(--r-sm);
+}
+
+.privacy-card .effective {
+  margin-top: var(--s-8);
+  color: var(--ink-mute);
+  font-size: var(--t-sm);
+}
+
+.privacy-card .back-link {
+  display: inline-block;
+  margin-top: var(--s-4);
+  color: var(--accent);
+  font-weight: 700;
+}
+
+/* ==========================================================================
+   10. Responsive — mobile-first, so this is the larger-screen case
+   ========================================================================== */
+
+@media (min-width: 40rem) {
+  h1 {
+    font-size: var(--t-2xl);
+  }
+
+  .funnel {
+    padding-top: var(--s-10);
+  }
+}
+
+/* Small phones: tighten the gutters so a 360px viewport keeps both edges
+   without pushing the action off-screen. */
+@media (max-width: 24rem) {
+  .funnel {
+    padding-left: var(--s-3);
+    padding-right: var(--s-3);
+  }
+
+  .funnel-card {
+    padding: var(--s-5);
+    border-radius: var(--r-md);
+  }
+
+  .option {
+    padding: var(--s-4);
+  }
+
+  .option-card {
+    min-height: 8rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
 }

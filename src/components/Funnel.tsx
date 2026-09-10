@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { getExternalId, getAttribution, refreshCookies } from '../lib/tracking';
 import { STATES, type Option } from '../lib/states';
 import { funnelReady, funnelStep, leadSubmitted } from '../lib/datalayer';
+import { CheckIcon, ChevronLeftIcon, ChevronRightIcon, CrossIcon } from './Icons';
 
 /**
  * Social Security disability qualification funnel.
@@ -20,6 +21,18 @@ import { funnelReady, funnelStep, leadSubmitted } from '../lib/datalayer';
  * Restriction is decided by the server against the `state_rules` table, never
  * by a list hardcoded in the browser — that is what makes the restricted list
  * changeable without a deploy.
+ *
+ * UX review (docs/ux-growth-review-2026-09-10.md) changes incorporated:
+ *   - gender removed (it was a Meta match key, not a knockout question)
+ *   - state uses a native picker + explicit confirm, shown immediately after
+ *     age so unsupported states leave early instead of answering four more
+ *   - a knockout "No" exits to a distinct non-match screen with no contact
+ *     capture, instead of walking a non-match through the full contact form
+ *   - work-history wording corrected to the SSA 20-of-40-quarter rule
+ *   - contact is phone-led: name + phone required, email and ZIP optional
+ *   - compact brand header, plain-language service promise, progress labels
+ *   - the availability check distinguishes "cannot check right now" (retry)
+ *     from "we do not serve this state" (restricted outcome)
  */
 
 interface Answer {
@@ -37,38 +50,39 @@ interface Contact {
   consent: boolean;
 }
 
+type Result = 'none' | 'restricted' | 'disqualified';
+
 const YES_NO: Option[] = [
   { label: 'Yes', value: 'Yes' },
   { label: 'No', value: 'No' },
 ];
 
-const QUESTIONS: { id: string; q: string; o: Option[] }[] = [
+/** Questions whose "No" ends the qualification. Mirrors api/_lib/qualification.ts. */
+const KNOCKOUT_IDS = ['age', 'work', 'duration', 'workHistory', 'doctor'];
+
+const QUESTIONS: { id: string; q: string; o: Option[]; picker?: boolean }[] = [
   { id: 'age', q: 'Are you between 18 and 64 years old?', o: YES_NO },
-  // Gender is a Meta advanced-matching key (`ge`), and one tap. "Prefer not to
-  // say" maps to a value the CAPI client drops rather than hashes, so opting
-  // out costs the person nothing and sends Meta nothing.
-  {
-    id: 'gender',
-    q: 'What is your gender?',
-    o: [
-      { label: 'Male', value: 'm' },
-      { label: 'Female', value: 'f' },
-      { label: 'Prefer not to say', value: 'undisclosed' },
-    ],
-  },
-  { id: 'state', q: 'Which state do you live in?', o: STATES },
+  // The state is asked second, not mid-flow. Availability is the first piece
+  // of information worth knowing: a person in a state we cannot serve should
+  // learn that now, not after four more taps.
+  { id: 'state', q: 'Which state do you live in?', o: STATES, picker: true },
   { id: 'work', q: 'Are you unable to work because of a medical condition?', o: YES_NO },
   {
     id: 'duration',
-    q: 'Has this condition lasted, or is it expected to last, 12 months or longer?',
+    q: 'Has your condition lasted—or is it expected to last—at least 12 months?',
     o: YES_NO,
   },
-  { id: 'doctor', q: 'Are you currently under a doctor’s care for this condition?', o: YES_NO },
+  // SSA: benefit entitlements depend on work credits earned in the ten years
+  // before the onset of disability — generally 20 credits, roughly five of the
+  // last ten years, not "20 years of work". "40 quarters" is the same thing
+  // stated as credits-per-quarter, and asking people to count quarters is a
+  // calculation on a yes/no screen.
   {
-    id: 'months',
-    q: 'Have you worked 20+ years (roughly 40 quarters) in your working life?',
+    id: 'workHistory',
+    q: 'Have you worked 20 of the last 40 quarters (roughly 5 of the last 10 years)?',
     o: YES_NO,
   },
+  { id: 'doctor', q: 'Are you seeing a doctor for this condition?', o: YES_NO },
 ];
 
 const STEPS = QUESTIONS.length + 1; // +1 for the contact step
@@ -96,14 +110,19 @@ const EMPTY_CONTACT: Contact = {
   consent: false,
 };
 
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
 export default function Funnel({ variant }: { variant: string }) {
   const [step, setStep] = useState(0);
   const [answers, setAnswers] = useState<Record<string, Answer>>({});
   const [contact, setContact] = useState<Contact>(EMPTY_CONTACT);
   const [disposition, setDisposition] = useState<string>('qualified');
+  const [result, setResult] = useState<Result>('none');
   const [status, setStatus] = useState<'idle' | 'submitting' | 'done' | 'error'>('idle');
   const [error, setError] = useState<string | null>(null);
-  const [validatingState, setValidatingState] = useState(false);
+  const [checkingState, setCheckingState] = useState(false);
+  const [stateError, setStateError] = useState<string | null>(null);
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
 
   // Held in a ref as well as state: `answer()` fires the next partial save
   // before React has re-rendered, and the save must carry the id it was
@@ -111,6 +130,9 @@ export default function Funnel({ variant }: { variant: string }) {
   const leadIdRef = useRef<string | null>(null);
   const saveQueueRef = useRef<Promise<unknown>>(Promise.resolve());
   const mainRef = useRef<HTMLDivElement>(null);
+  // A disqualified lead is finalised the moment the answer is given; the ref
+  // stops Back/forward re-navigation from firing a second completion.
+  const disqualifiedSentRef = useRef(false);
 
   const externalId = useMemo(() => getExternalId(), []);
   const submissionId = useMemo(
@@ -120,7 +142,13 @@ export default function Funnel({ variant }: { variant: string }) {
         : `submission-${Date.now()}-${Math.random().toString(16).slice(2)}`,
     []
   );
-  const restricted = disposition === 'restricted';
+  const restricted = result === 'restricted';
+
+  const stateValue = answers.state?.a ?? '';
+  const stateLabel = useMemo(
+    () => STATES.find((s) => s.value === stateValue)?.label ?? '',
+    [stateValue]
+  );
 
   useEffect(() => {
     // Tags are configured in GTM; the app only announces what happened.
@@ -133,16 +161,20 @@ export default function Funnel({ variant }: { variant: string }) {
     if (status === 'done') return;
     const target = mainRef.current?.querySelector('[data-focus]');
     if (target) (target as HTMLElement).focus({ preventScroll: true });
-  }, [step, status]);
+  }, [step, status, result]);
 
   const currentQuestion = QUESTIONS[step];
 
   /**
-   * Save progress. Returns the server's disposition so the contact step knows
-   * whether it is allowed to ask for contact details at all.
+   * Save progress. Returns { ok, disposition } so the state question can
+   * distinguish a real "restricted" verdict from a network failure — the two
+   * are not the same thing and must not share a message.
    */
-  async function persistPartial(nextAnswers: Record<string, Answer>): Promise<string | null> {
-    const save = async (): Promise<string | null> => {
+  async function persistPartial(nextAnswers: Record<string, Answer>): Promise<{
+    ok: boolean;
+    disposition: string | null;
+  }> {
+    const save = async (): Promise<{ ok: boolean; disposition: string | null }> => {
       try {
         const res = await fetch('/api/lead', {
           method: 'POST',
@@ -157,14 +189,14 @@ export default function Funnel({ variant }: { variant: string }) {
             externalId,
           }),
         });
-        if (!res.ok) return null;
+        if (!res.ok) return { ok: false, disposition: null };
         const data = await res.json();
         if (data.leadId) leadIdRef.current = data.leadId;
-        if (data.disposition) setDisposition(data.disposition);
-        return typeof data.disposition === 'string' ? data.disposition : null;
+        if (typeof data.disposition === 'string') setDisposition(data.disposition);
+        return { ok: true, disposition: typeof data.disposition === 'string' ? data.disposition : null };
       } catch {
         // A partial save must never block the funnel.
-        return null;
+        return { ok: false, disposition: null };
       }
     };
 
@@ -173,6 +205,65 @@ export default function Funnel({ variant }: { variant: string }) {
     const pending = saveQueueRef.current.then(save, save);
     saveQueueRef.current = pending.then(() => undefined, () => undefined);
     return pending;
+  }
+
+  /** Finalise a lead that will never be contacted: no contact fields, no consent. */
+  async function completeWithoutContact(nextAnswers: Record<string, Answer>) {
+    if (disqualifiedSentRef.current) return;
+    disqualifiedSentRef.current = true;
+    try {
+      await saveQueueRef.current;
+      await fetch('/api/lead', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          leadId: leadIdRef.current,
+          submissionId,
+          variant,
+          status: 'complete',
+          answers: nextAnswers,
+          contact: undefined,
+          attribution: getAttribution(),
+          externalId,
+        }),
+      });
+    } catch {
+      // The disqualified screen is informational; a failed completion retries
+      // on the next attempt the drain reconciliation offers. Do not loop here.
+    }
+  }
+
+  /** The state screen's confirm button: real availability verdict, explicitly confirmed. */
+  async function confirmState() {
+    const next = {
+      ...answers,
+      state: { q: currentQuestion.q, a: stateValue, label: stateLabel },
+    };
+    if (!stateValue) return;
+
+    setCheckingState(true);
+    setStateError(null);
+    const save = await persistPartial(next);
+    setCheckingState(false);
+
+    if (!save.ok) {
+      // "cannot check right now" ≠ "we do not serve this state". The person
+      // stays on the picker, can retry, and is never asked for contact details
+      // without a verdict.
+      setStateError('We could not check availability right now. Please try again in a moment.');
+      return;
+    }
+
+    setAnswers(next);
+    // The state screen is confirmed rather than tapped, but it is still an
+    // answered step: the ordinal keeps the step curve contiguous (1..6) for the
+    // drop-off analysis the marketing side relies on.
+    funnelStep({ stepNumber: step + 1, variant });
+    if (save.disposition === 'restricted') {
+      setResult('restricted');
+      return;
+    }
+    setStep(step + 1);
   }
 
   async function answer(o: Option) {
@@ -184,19 +275,18 @@ export default function Funnel({ variant }: { variant: string }) {
     setAnswers(next);
     setError(null);
 
-    // Every step is saved, including the last one — that is what gives a
-    // truthful drop-off number for the final question.
-    if (question.id === 'state') {
-      // Do not reveal or collect contact fields until the server-side
-      // compliance lookup has answered. If validation is unavailable, fail
-      // closed and show the restricted completion path.
-      setValidatingState(true);
-      const serverDisposition = await persistPartial(next);
-      if (!serverDisposition) setDisposition('restricted');
-      setValidatingState(false);
-    } else {
+    funnelStep({ stepNumber: step + 1, variant });
+
+    if (question.id !== 'state' && KNOCKOUT_IDS.includes(question.id) && o.value === 'No') {
+      // A confirmed non-match leaves now — no more questions, no contact form.
+      // The server records the disposition; the screen below is informational.
       void persistPartial(next);
+      void completeWithoutContact(next);
+      setResult('disqualified');
+      return;
     }
+
+    void persistPartial(next);
 
     // Ad and analytics platforms get the step ORDINAL only — never the answer,
     // and never the question's semantic id. Both halves matter: the answer is
@@ -204,12 +294,37 @@ export default function Funnel({ variant }: { variant: string }) {
     // questionnaire is itself a contribution to the Business Tool Terms
     // classification that got this domain flagged. The ordinal gives the same
     // drop-off curve. Semantic ids stay in `app_events`, which is our database.
-    funnelStep({ stepNumber: step + 1, variant });
-
     setStep(step + 1);
   }
 
+  function validateContact(): boolean {
+    const errors: Record<string, string> = {};
+    if (!contact.firstName.trim()) errors.firstName = 'Enter your first name.';
+    if (!contact.lastName.trim()) errors.lastName = 'Enter your last name.';
+    const digits = contact.phone.replace(/\D/g, '');
+    const validPhone = digits.length === 10 || (digits.length === 11 && digits.startsWith('1'));
+    if (!validPhone) errors.phone = 'Enter a valid 10-digit phone number, e.g. 555-010-0100.';
+    if (contact.email.trim() && !EMAIL_RE.test(contact.email.trim()))
+      errors.email = 'Enter a valid email address, e.g. name@example.com.';
+    if (contact.zip.trim() && !/^\d{5}$/.test(contact.zip.trim()))
+      errors.zip = 'Enter a 5-digit ZIP code, e.g. 78701.';
+    setFieldErrors(errors);
+    if (Object.keys(errors).length > 0) {
+      const first = Object.keys(errors)[0];
+      const el = mainRef.current?.querySelector<HTMLElement>(`[data-field="${first}"]`);
+      el?.focus();
+      return false;
+    }
+    return true;
+  }
+
+  function patch(next: Partial<Contact>, field?: string) {
+    setContact((c) => ({ ...c, ...next }));
+    if (field && fieldErrors[field]) setFieldErrors((e) => ({ ...e, [field]: '' }));
+  }
+
   async function submit() {
+    if (!validateContact()) return;
     setStatus('submitting');
     setError(null);
     try {
@@ -224,19 +339,16 @@ export default function Funnel({ variant }: { variant: string }) {
           variant,
           status: 'complete',
           answers,
-          // Restricted leads never send contact details in the first place.
-          contact: restricted
-            ? undefined
-            : {
-                firstName: contact.firstName.trim(),
-                lastName: contact.lastName.trim(),
-                email: contact.email.trim(),
-                phone: contact.phone.trim(),
-                zip: contact.zip.trim(),
-              },
+          contact: {
+            firstName: contact.firstName.trim(),
+            lastName: contact.lastName.trim(),
+            email: contact.email.trim() || null,
+            phone: contact.phone.trim(),
+            zip: contact.zip.trim() || null,
+          },
           consent: {
             version: CONSENT_VERSION,
-            text: restricted ? CONSENT_TEXT.restricted : CONSENT_TEXT.standard,
+            text: CONSENT_TEXT.standard,
             given: contact.consent,
             timestamp: new Date().toISOString(),
           },
@@ -250,8 +362,8 @@ export default function Funnel({ variant }: { variant: string }) {
         setStatus('error');
         setError(
           data.error === 'contact_required'
-            ? 'Please enter an email address or phone number.'
-            : 'Something went wrong. Please try again.'
+            ? 'Please enter your name and a phone number we can call you on.'
+            : 'Something went wrong. Please check your details and try again.'
         );
         return;
       }
@@ -276,6 +388,56 @@ export default function Funnel({ variant }: { variant: string }) {
     }
   }
 
+  /** Restricted leads complete with only their consent — no contact, no more questions. */
+  async function submitRestricted() {
+    if (!contact.consent) {
+      setError('Please confirm you understand that no one will contact you about this enquiry.');
+      return;
+    }
+    setStatus('submitting');
+    setError(null);
+    try {
+      await saveQueueRef.current;
+      const res = await fetch('/api/lead', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          leadId: leadIdRef.current,
+          submissionId,
+          variant,
+          status: 'complete',
+          answers,
+          contact: undefined,
+          consent: {
+            version: CONSENT_VERSION,
+            text: CONSENT_TEXT.restricted,
+            given: true,
+            timestamp: new Date().toISOString(),
+          },
+          attribution: getAttribution(),
+          externalId,
+        }),
+      });
+
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.leadId) {
+        setStatus('error');
+        setError('Something went wrong. Please try again.');
+        return;
+      }
+      leadIdRef.current = data.leadId;
+      if (data.disposition) setDisposition(data.disposition);
+      leadSubmitted({ eventId: data.eventId, variant, disposition: 'restricted' });
+      setStatus('done');
+      setStep(STEPS);
+    } catch {
+      setStatus('error');
+      setError('Could not submit. Please check your connection and try again.');
+    }
+  }
+
+  // ---- Done screens ------------------------------------------------------
+
   if (status === 'done') {
     return (
       <div ref={mainRef} className="funnel done">
@@ -286,30 +448,118 @@ export default function Funnel({ variant }: { variant: string }) {
           <p>
             {restricted
               ? 'We have recorded your answers. No one will contact you about this enquiry.'
-              : 'We have received your answers. A benefits specialist may contact you.'}
+              : 'We have received your request. A specialist will review your answers and may contact you.'}
           </p>
         </div>
       </div>
     );
   }
 
-  function patch(next: Partial<Contact>) {
-    setContact((c) => ({ ...c, ...next }));
+  // ---- Early exit: confirmed non-match -----------------------------------
+
+  if (result === 'disqualified') {
+    return (
+      // `exit`, not just `done`: this screen must not wear the green
+      // completion tick. A person who has been knocked out has not succeeded
+      // at anything, and a celebratory mark over "may not be a match" reads
+      // as either a bug or a taunt.
+      <div ref={mainRef} className="funnel done exit">
+        <div className="funnel-card">
+          <h1 data-focus tabIndex={-1}>
+            This service may not be a match
+          </h1>
+          <p>
+            Based on your answers, our disability support service may not be able to help you.
+            We will not contact you, and no further details are needed.
+          </p>
+          <p>
+            The Social Security Administration provides official information about disability
+            benefits at{' '}
+            <a className="link" href="https://www.ssa.gov/benefits/disability/" target="_blank" rel="noopener noreferrer">
+              ssa.gov
+            </a>
+            .
+          </p>
+          <button className="link" type="button" onClick={() => setResult('none')}>
+            Review my answers
+          </button>
+        </div>
+      </div>
+    );
   }
+
+  // ---- Early exit: restricted-state outcome ------------------------------
+
+  if (result === 'restricted') {
+    return (
+      <div ref={mainRef} className="funnel">
+        <FunnelHeader intro={false} variant={variant} />
+        <ProgressLabel step={STEPS - 1} total={STEPS} />
+        <div className="funnel-card">
+          <h1 data-focus tabIndex={-1}>
+            Thank you for answering
+          </h1>
+          <p className="note">
+            Based on the state you selected we are not able to pass your details to a benefits
+            specialist. Your answers are still recorded.
+          </p>
+          <form
+            data-clarity-mask="true"
+            onSubmit={(e) => {
+              e.preventDefault();
+              void submitRestricted();
+            }}
+          >
+            <div className="consent">
+              <input
+                id="consent"
+                type="checkbox"
+                checked={contact.consent}
+                onChange={(e) => patch({ consent: e.target.checked })}
+              />
+              <label htmlFor="consent">{CONSENT_TEXT.restricted}</label>
+            </div>
+
+            {error && (
+              <p className="error" role="alert">
+                {error}
+              </p>
+            )}
+
+            <button className="btn" type="submit" disabled={status === 'submitting'}>
+              {status === 'submitting' ? 'Submitting…' : 'Continue'}
+            </button>
+          </form>
+
+          <button
+            className="link"
+            type="button"
+            disabled={status === 'submitting'}
+            onClick={() => {
+              setResult('none');
+              setStep(QUESTIONS.findIndex((q) => q.id === 'state'));
+            }}
+          >
+            Change state
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // ---- Contact step ------------------------------------------------------
 
   function renderContact() {
     return (
       <section>
         <h1 data-focus tabIndex={-1}>
-          {restricted ? 'Thank you for answering' : 'A few details to finish'}
+          A few details to finish
         </h1>
 
-        {restricted && (
-          <p className="note">
-            Based on the state you selected we are not able to pass your details to a
-            benefits specialist. Your answers are still recorded.
-          </p>
-        )}
+        <p className="note">
+          A specialist may call you to review your answers. We use your details only to reach you
+          about this enquiry — this is not an application for benefits.
+        </p>
 
         {/*
           Everything the person types is masked out of Clarity recordings.
@@ -325,68 +575,103 @@ export default function Funnel({ variant }: { variant: string }) {
             void submit();
           }}
         >
-          {!restricted && (
-            <>
-              <label htmlFor="first">First name</label>
-              <input
-                id="first"
-                className="input"
-                autoComplete="given-name"
-                required
-                value={contact.firstName}
-                onChange={(e) => patch({ firstName: e.target.value })}
-              />
+          <label htmlFor="first">First name</label>
+          <input
+            id="first"
+            className="input"
+            autoComplete="given-name"
+            required
+            data-field="firstName"
+            aria-invalid={Boolean(fieldErrors.firstName)}
+            aria-describedby={fieldErrors.firstName ? 'err-first' : undefined}
+            value={contact.firstName}
+            onChange={(e) => patch({ firstName: e.target.value }, 'firstName')}
+          />
+          {fieldErrors.firstName && (
+            <p className="error" id="err-first">
+              {fieldErrors.firstName}
+            </p>
+          )}
 
-              <label htmlFor="last">Last name</label>
-              <input
-                id="last"
-                className="input"
-                autoComplete="family-name"
-                required
-                value={contact.lastName}
-                onChange={(e) => patch({ lastName: e.target.value })}
-              />
+          <label htmlFor="last">Last name</label>
+          <input
+            id="last"
+            className="input"
+            autoComplete="family-name"
+            required
+            data-field="lastName"
+            aria-invalid={Boolean(fieldErrors.lastName)}
+            aria-describedby={fieldErrors.lastName ? 'err-last' : undefined}
+            value={contact.lastName}
+            onChange={(e) => patch({ lastName: e.target.value }, 'lastName')}
+          />
+          {fieldErrors.lastName && (
+            <p className="error" id="err-last">
+              {fieldErrors.lastName}
+            </p>
+          )}
 
-              <label htmlFor="email">Email</label>
-              <input
-                id="email"
-                type="email"
-                className="input"
-                autoComplete="email"
-                inputMode="email"
-                required
-                value={contact.email}
-                onChange={(e) => patch({ email: e.target.value })}
-              />
+          <label htmlFor="phone">Phone</label>
+          <input
+            id="phone"
+            type="tel"
+            className="input"
+            autoComplete="tel"
+            inputMode="tel"
+            required
+            data-field="phone"
+            aria-invalid={Boolean(fieldErrors.phone)}
+            aria-describedby={fieldErrors.phone ? 'err-phone' : undefined}
+            value={contact.phone}
+            onChange={(e) => patch({ phone: e.target.value }, 'phone')}
+          />
+          {fieldErrors.phone && (
+            <p className="error" id="err-phone">
+              {fieldErrors.phone}
+            </p>
+          )}
 
-              <label htmlFor="phone">Phone</label>
-              <input
-                id="phone"
-                type="tel"
-                className="input"
-                autoComplete="tel"
-                inputMode="tel"
-                required
-                value={contact.phone}
-                onChange={(e) => patch({ phone: e.target.value })}
-              />
+          {/* Email is useful for follow-up where a call is not answered, but a
+              callback service must not require it. Optional. */}
+          <label htmlFor="email">Email (optional)</label>
+          <input
+            id="email"
+            type="email"
+            className="input"
+            autoComplete="email"
+            inputMode="email"
+            data-field="email"
+            aria-invalid={Boolean(fieldErrors.email)}
+            aria-describedby={fieldErrors.email ? 'err-email' : undefined}
+            value={contact.email}
+            onChange={(e) => patch({ email: e.target.value }, 'email')}
+          />
+          {fieldErrors.email && (
+            <p className="error" id="err-email">
+              {fieldErrors.email}
+            </p>
+          )}
 
-              {/* ZIP is asked because it is one of Meta's match keys and the
-                  cheapest one to collect — one field, already expected on a
-                  benefits form. */}
-              <label htmlFor="zip">ZIP code</label>
-              <input
-                id="zip"
-                className="input"
-                autoComplete="postal-code"
-                inputMode="numeric"
-                pattern="[0-9]{5}"
-                maxLength={5}
-                required
-                value={contact.zip}
-                onChange={(e) => patch({ zip: e.target.value.replace(/\D/g, '') })}
-              />
-            </>
+          {/* ZIP improves partner routing and Meta matching when present, and
+              costs one field — but it is not required to make a callback. */}
+          <label htmlFor="zip">ZIP code (optional)</label>
+          <input
+            id="zip"
+            className="input"
+            autoComplete="postal-code"
+            inputMode="numeric"
+            pattern="[0-9]{5}"
+            maxLength={5}
+            data-field="zip"
+            aria-invalid={Boolean(fieldErrors.zip)}
+            aria-describedby={fieldErrors.zip ? 'err-zip' : undefined}
+            value={contact.zip}
+            onChange={(e) => patch({ zip: e.target.value.replace(/\D/g, '') }, 'zip')}
+          />
+          {fieldErrors.zip && (
+            <p className="error" id="err-zip">
+              {fieldErrors.zip}
+            </p>
           )}
 
           <div className="consent">
@@ -397,9 +682,7 @@ export default function Funnel({ variant }: { variant: string }) {
               checked={contact.consent}
               onChange={(e) => patch({ consent: e.target.checked })}
             />
-            <label htmlFor="consent">
-              {restricted ? CONSENT_TEXT.restricted : CONSENT_TEXT.standard}
-            </label>
+            <label htmlFor="consent">{CONSENT_TEXT.standard}</label>
           </div>
 
           {error && (
@@ -409,11 +692,17 @@ export default function Funnel({ variant }: { variant: string }) {
           )}
 
           <button className="btn" type="submit" disabled={status === 'submitting'}>
-            {status === 'submitting' ? 'Submitting…' : 'Submit'}
+            {status === 'submitting' ? 'Submitting…' : 'Request a callback'}
           </button>
         </form>
 
-        <button className="link" type="button" onClick={() => setStep(QUESTIONS.length - 1)}>
+        <button
+          className="link"
+          type="button"
+          disabled={status === 'submitting'}
+          onClick={() => setStep(QUESTIONS.length - 1)}
+        >
+          <ChevronLeftIcon />
           Back
         </button>
       </section>
@@ -423,37 +712,124 @@ export default function Funnel({ variant }: { variant: string }) {
   if (step >= QUESTIONS.length) {
     return (
       <div ref={mainRef} className="funnel">
-        <ProgressBar step={step} total={STEPS} />
+        {/* The header stays on the contact step on purpose: this is the screen
+            where a person hands over a phone number, so it is the worst
+            possible moment for the brand and the privacy link to disappear. */}
+        <FunnelHeader intro={false} variant={variant} />
+        <ProgressLabel step={step} total={STEPS} />
         <div className="funnel-card">{renderContact()}</div>
       </div>
     );
   }
 
+  // ---- Question screen ---------------------------------------------------
+
+  const isState = currentQuestion.picker;
+  // Two answers get the icon-card treatment, side by side; anything longer
+  // stays a stacked list, because a grid of eight cards is a wall.
+  const isBinary = !isState && currentQuestion.o.length <= 2;
+  const isKnockoutNo = !isState && KNOCKOUT_IDS.includes(currentQuestion.id);
+  const isSelected = { value: currentQuestion.id === 'state' ? stateValue : undefined };
+
+  const answerState = (code: string) => {
+    const next = {
+      ...answers,
+      state: { q: currentQuestion.q, a: code, label: STATES.find((s) => s.value === code)?.label ?? code },
+    };
+    setAnswers(next);
+  };
+
   return (
     <div ref={mainRef} className="funnel">
-      <ProgressBar step={step} total={STEPS} />
+      <FunnelHeader intro={step === 0} variant={variant} />
+      <ProgressLabel step={step} total={STEPS} />
       <section className="funnel-card">
         <h1 data-focus tabIndex={-1}>
           {currentQuestion.q}
         </h1>
-        <fieldset>
-          <legend className="sr-only">{currentQuestion.q}</legend>
-          <div className={`options${currentQuestion.o.length > 2 ? ' options-list' : ''}`} role="group">
-            {currentQuestion.o.map((o) => (
-              <button
-                key={o.value}
-                type="button"
-                className="option"
-                disabled={validatingState}
-                onClick={() => void answer(o)}
-              >
-                {o.label}
-              </button>
-            ))}
-          </div>
-        </fieldset>
+
+        {isState ? (
+          <fieldset>
+            <legend className="sr-only">{currentQuestion.q}</legend>
+            <label htmlFor="state-picker">Select your state</label>
+            <select
+              id="state-picker"
+              className="input"
+              value={stateValue}
+              disabled={checkingState}
+              onChange={(e) => answerState(e.target.value)}
+            >
+              <option value="">Choose a state…</option>
+              {STATES.map((s) => (
+                <option key={s.value} value={s.value}>
+                  {s.label}
+                </option>
+              ))}
+            </select>
+
+            {stateError && (
+              <p className="error" role="alert">
+                {stateError}
+              </p>
+            )}
+
+            <button
+              className="btn"
+              type="button"
+              disabled={checkingState || !stateValue}
+              onClick={() => void confirmState()}
+            >
+              {checkingState ? 'Checking availability…' : 'Check availability'}
+            </button>
+          </fieldset>
+        ) : (
+          <fieldset>
+            <legend className="sr-only">{currentQuestion.q}</legend>
+            <div
+              className={`options${isBinary ? ' options-binary' : ' options-list'}`}
+              role="group"
+            >
+              {currentQuestion.o.map((o) => {
+                const chosen = answers[currentQuestion.id]?.a === o.value;
+                const affirmative = o.value === 'Yes';
+                return (
+                  <button
+                    key={o.value}
+                    type="button"
+                    className={`option${isBinary ? ' option-card' : ''}${
+                      chosen ? ' selected' : ''
+                    }`}
+                    aria-pressed={chosen}
+                    disabled={checkingState}
+                    onClick={() => void answer(o)}
+                  >
+                    {/*
+                      The icon is aria-hidden and carries no title, so the
+                      accessible name of this button stays exactly "Yes" or
+                      "No". Decoration on the outside, meaning in the label.
+                    */}
+                    {isBinary && (
+                      <span className={`option-icon option-icon--${affirmative ? 'go' : 'stop'}`}>
+                        {affirmative ? <CheckIcon /> : <CrossIcon />}
+                      </span>
+                    )}
+                    {o.label}
+                    {!isBinary && <ChevronRightIcon className="option-arrow" />}
+                  </button>
+                );
+              })}
+            </div>
+          </fieldset>
+        )}
+
         {step > 0 && (
-          <button className="link" type="button" onClick={() => setStep(step - 1)}>
+          <button
+            className="link"
+            type="button"
+            disabled={status === 'submitting'}
+            onClick={() => setStep(step - 1)}
+          >
+            <ChevronLeftIcon />
             Back
           </button>
         )}
@@ -462,18 +838,48 @@ export default function Funnel({ variant }: { variant: string }) {
   );
 }
 
-function ProgressBar({ step, total }: { step: number; total: number }) {
-  const pct = Math.round((step / total) * 100);
+function FunnelHeader({ intro, variant }: { intro: boolean; variant: string }) {
+  return (
+    <header className="brand">
+      <span className="brand-name">LexHive</span>
+      <span className="brand-tag">
+        Find out whether our disability support service may be a match.
+      </span>
+      {intro && (
+        <span className="brand-intro">
+          Answer a few short questions. This is not an application for benefits.
+        </span>
+      )}
+      <a className="brand-privacy" href="/privacy">
+        Privacy notice
+      </a>
+    </header>
+  );
+}
+
+/**
+ * Worded progress, not a fabricated percentage. "Question 2 of 6" is honest
+ * and branch-aware; a percentage implies a measured completion time nobody has
+ * observed. W3C recommends communicating step count in multi-page forms.
+ */
+function ProgressLabel({ step, total }: { step: number; total: number }) {
+  const atContact = step >= total - 1 && total > 1;
+  const label = atContact ? 'Final step: contact details' : `Question ${step + 1} of ${total - 1}`;
+  const pct = Math.min(100, Math.max(0, Math.round((step / total) * 100)));
   return (
     <div
       className="progress"
       role="progressbar"
-      aria-label="Progress through the questions"
+      aria-label={label}
       aria-valuenow={pct}
       aria-valuemin={0}
       aria-valuemax={100}
+      aria-valuetext={label}
     >
-      <div className="progress-fill" style={{ width: `${pct}%` }} />
+      <div className="progress-track">
+        <div className="progress-fill" style={{ width: `${pct}%` }} />
+      </div>
+      <span className="progress-label">{label}</span>
     </div>
   );
 }
