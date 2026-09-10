@@ -23,26 +23,38 @@ The build passes (`npm run build`), typechecks clean (`tsc --noEmit`), and both
 | ✅ | Supabase — `supabase/schema.sql` applied; `supabase/verify.sql` reports the live state of every object it creates |
 | ✅ | Server-side env vars on Vercel: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `META_PIXEL_ID`, `META_API_VERSION`, `META_CAPI_ACCESS_TOKEN`, `DRAIN_SECRET`, `OPS_KEY`, `PUBLIC_BASE_URL`, `N8N_WEBHOOK_URL`, `N8N_INTERNAL_SECRET`, `AIRTABLE_BASE_ID` |
 | ✅ | n8n `LexHive Outbox Drain` on a 60-second schedule, reading its config from Supabase rather than env vars |
-| ✅ | 38 unit tests + a 30-test Playwright suite |
+| ✅ | 40 unit tests + a 30-test Playwright suite |
 | ⬜ | `/api/health` and `n8n/lexhive-delivery-monitor.json` — written and committed, not yet deployed and activated |
-| ⬜ | GTM container export committed into `gtm/` |
-| ⬜ | Meta Test Events screenshot (Browser + Server, deduplicated) |
+| ✅ | GTM container export committed into `gtm/` |
+| ⬜ | Meta Test Events screenshot (Browser + Server, deduplicated) — after the redeploy below |
 
-**Verified against production, 9 September 2026.** All three dispositions driven
-end to end through a real browser and cross-checked in Meta Events Manager,
-Airtable and n8n: the browser `Lead` event carried the same `event_id` the
-server persisted, restricted leads reached neither a contact field nor a Meta
-optimisation event, and both Airtable tables received what they should. Meta
-reports 8.0/10 match quality on `Lead` with browser and server both delivering.
+**Verification run, 9 September 2026** (pre-rewrite build). All three dispositions
+were driven end to end through a real browser and cross-checked in Meta Events
+Manager, Airtable and n8n: the browser `Lead` event carried the same `event_id`
+the server persisted, restricted leads reached neither a contact field nor a
+Meta optimisation event, and both Airtable tables received what they should.
+Meta's Test Events reporting at the time showed 8.0/10 match quality on `Lead`
+with browser and server both delivering. `docs/verification-2026-09-09.md` is
+the full record; `PRODUCTION.md` §3 is what came of it.
 
 That run also found the outage this repository is now built around — the drain
-had never once executed. `docs/verification-2026-09-09.md` is the full record;
-`PRODUCTION.md` §3 is what came of it.
+had never once executed. A note of caution about the paragraph above: it
+predates the UX-review rebuild. The current funnel (six questions, state asked
+second, knockout early-exit, phone-led contact) is **not** verified against
+production until the deployment below is done and the suite re-run.
 
-**To finish:** redeploy so `/api/health` is live, then import and activate
-`n8n/lexhive-delivery-monitor.json`. Then export the GTM container into `gtm/`
-(`docs/gtm-setup.md`) and capture the Meta Test Events deduplication
-screenshot.
+**To finish:** import and activate `n8n/lexhive-delivery-monitor.json` (its
+export now sets `alwaysOutputData` and continues on health-check errors so a
+degraded signal still alerts), activate the nurture branch of
+`n8n/lexhive-lead-routing.json` and create the `Nurture` Airtable table it
+writes to, and capture the Meta Test Events deduplication screenshot.
+
+The current build is deployed and the full Playwright suite is green against
+it. A note of caution: the funnel's verified-in-production lineage still crosses
+a rewrite. `docs/verification-2026-09-09.md` documents the pre-rewrite
+end-to-end run; the rebuilt funnel (six questions, state asked second, knockout
+early-exit, phone-led contact, disqualified-opt-in nurture) is verified by the
+Playwright suite described in `tests/README.md`.
 
 ---
 
@@ -58,8 +70,8 @@ POST /api/lead
    ▼
 POST /api/drain  (triggered by n8n Schedule, every 60s)
    │  claim_outbox_batch() — FOR UPDATE SKIP LOCKED
-   ├──► Meta Conversions API      dedup via shared event_id
-   └──► n8n webhook ──► Airtable  upsert on Lead ID
+   ├──► Meta Conversions API      dedup via shared event_id (Lead | NurtureOptIn)
+   └──► n8n webhook ──► Airtable  upsert on Lead ID, Sales | Nurture | None
              │
              └─ failure ──► exponential backoff ──► dead-letter ──► /ops + Sentry
 ```
@@ -162,6 +174,21 @@ returns an id, and each later one sends it back. An abandoned funnel leaves one
 recoverable record with the step it stopped at, rather than one row per
 question inflating every count on `/ops` by a factor of six.
 
+**Delivery edge cases.** Three things that used to go wrong in the gap between
+"the event was delivered" and "the delivery is recorded", all now closed:
+
+- A worker that crashes mid-flight leaves a row `delivering`; when its lease
+  expires, the row is reclaimed **only if the attempt budget remains**. A row
+  already at `max_attempts` is dead-lettered at reclamation instead of being
+  reset to `pending` and looped through the budget forever.
+- Outcome writes (succeeded / dead / failed) are pinned to the lease and the
+  exact attempt number, so a stale worker cannot overwrite a newer worker's
+  result. If the outcome fails to persist, the row is counted **unresolved**
+  and redelivered rather than reported as a success.
+- The drain honours a wall-clock deadline (`DRAIN_DEADLINE_MS`, 25s default) so
+  a long batch returns before the n8n caller's 30s timeout and the unprocessed
+  tail stays leased for the next run.
+
 ---
 
 ## Privacy and compliance
@@ -198,6 +225,15 @@ uses 4rem targets, 1.125rem minimum body text, one question per screen, focus
 moved to each new question for screen reader users, and error states carried by
 shape as well as colour.
 
+Six questions, in this order: age, state, work, duration, work-history
+(20 of the last 40 quarters), doctor. State is asked second because availability
+is the first thing worth knowing — it is a native picker behind an explicit
+"Check availability" confirm, so an unsupported state ends early instead of
+after four more taps, and network failure shows "cannot check right now" rather
+than a fake verdict. A "No" on any knockout question exits to a distinct
+non-match screen that captures no contact details and fires no conversion event.
+Contact is phone-led: name and phone required, email and ZIP optional.
+
 Every size is in `rem`. `html { font-size: 100% }` preserves the user's own font
 setting, but that only reaches the page if everything downstream is relative to
 it — a px-based scale under a `100%` root is a comment, not a behaviour.
@@ -212,6 +248,16 @@ and completion rate are the same variable.
 **Assumed** the funnel is a US Social Security disability offer, since the
 reference funnel is SSDI. Phone normalization assumes a US country code and
 drops anything that is not a valid ten-digit US number (with an optional leading 1).
+
+**Questions are a deliberate screening model, not an exact reproduction of the
+reference.** The reference's age range differs from this funnel's 18–64 range,
+and this funnel asks work history as the SSA 20-of-40-quarters rule ("20 of the
+last 40 quarters, roughly 5 of the last 10 years") rather than "20+ years of
+work". Both are choices for a legal-lead-gen screen, and both should be changed
+in `src/components/Funnel.tsx` if the offer's actual targeting differs. The
+reference also supplies branding, privacy and terms links on its entry page; the
+links here are deliberately light so they are not mistaken for a government
+site.
 
 **Contact capture placement.** I kept contact capture at the end, matching the
 reference funnel. Moving it one step earlier would enrich every subsequent event
@@ -367,11 +413,8 @@ assertion diffs.
 ```bash
 npm install        # installs dependencies (incl. vercel CLI as dev dep)
 npx vercel login   # once
-npx vercel dev     # serves the React app AND the api/ functions together
+npm run dev        # = vercel dev: serves the React app AND the api/ functions together
 ```
-
-`npm run dev` will NOT run the `api/` folder — `npm run dev` = plain Vite, so
-`api/lead` and `api/drain` would 404. Use `vercel dev`.
 
 Copy `.env.example` → `.env.local` and fill in the blanks. Only `VITE_`-prefixed
 variables reach the browser; anything containing credentials (Supabase key, Meta

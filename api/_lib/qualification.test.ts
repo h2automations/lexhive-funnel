@@ -59,14 +59,14 @@ test('an unrecognisable state fails closed', () => {
 });
 
 test('every knockout question disqualifies, age included', () => {
-  for (const id of ['age', 'work', 'duration', 'doctor', 'months']) {
+  for (const id of ['age', 'work', 'duration', 'doctor', 'workHistory']) {
     assert.equal(isDisqualified(answers({ [id]: 'No' })), true, `${id} must knock out`);
   }
 });
 
 test('a complete set of Yes answers qualifies', () => {
   const complete = answers({
-    age: 'Yes', state: 'TX', work: 'Yes', duration: 'Yes', doctor: 'Yes', months: 'Yes',
+    age: 'Yes', state: 'TX', work: 'Yes', duration: 'Yes', doctor: 'Yes', workHistory: 'Yes',
   });
   assert.equal(isDisqualified(complete), false);
   assert.equal(classify({ answers: complete, restricted: false }), 'qualified');

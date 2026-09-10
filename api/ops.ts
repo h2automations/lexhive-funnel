@@ -85,9 +85,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   // ---- Health --------------------------------------------------------
-  const [{ data: health }, { data: problems }, { data: recent }] = await Promise.all([
+  // Every read contributes to the picture; the deal is that a page that cannot
+  // read the database must say so loudly (503) rather than render a
+  // misleadingly healthy empty dashboard — an empty "no problems" row is what
+  // a stopped database looks like at a glance.
+  const [health, problems, recent, counts, metrics] = await Promise.all([
     supabase.from('outbox_health').select('*'),
-
     supabase
       .from('delivery_outbox')
       .select(
@@ -96,20 +99,25 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       .in('status', ['failed', 'dead'])
       .order('updated_at', { ascending: false })
       .limit(50),
-
     supabase
       .from('delivery_outbox')
       .select('id, lead_id, destination, status, attempts, updated_at')
       .order('updated_at', { ascending: false })
       .limit(20),
-  ]);
-
-  // Funnel counts and delivery timings are aggregated in Postgres rather than
-  // by pulling rows into the function and calling .filter() on them.
-  const [{ data: counts }, { data: metrics }] = await Promise.all([
     supabase.rpc('lead_counts'),
     supabase.rpc('delivery_metrics', { window_hours: 24 }),
   ]);
+
+  const readErrors = [health.error, problems.error, recent.error, counts.error, metrics.error].filter(
+    Boolean
+  );
+  if (readErrors.length > 0) {
+    // Unreachable storage is itself an outage, and it is exactly the case the
+    // Replay button exists for — but a Replay button on a no-data page is
+    // worse than no page at all if it looks like green health.
+    log.error('ops.unavailable', { read_errors: readErrors.length });
+    return res.status(503).json({ error: 'delivery_status_unavailable', requestId: log.requestId });
+  }
 
   const funnel = {
     partial: 0,
@@ -117,17 +125,17 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     qualified: 0,
     restricted: 0,
     disqualified: 0,
-    ...(counts?.[0] ?? {}),
+    ...(counts.data?.[0] ?? {}),
   };
 
-  log.info('ops.viewed', { duration_ms: log.elapsed(), problem_count: problems?.length ?? 0 });
+  log.info('ops.viewed', { duration_ms: log.elapsed(), problem_count: problems.data?.length ?? 0 });
 
   return res.status(200).json({
-    health,
-    problems,
-    recent,
+    health: health.data,
+    problems: problems.data,
+    recent: recent.data,
     funnel,
-    metrics: metrics ?? [],
+    metrics: metrics.data ?? [],
     requestId: log.requestId,
   });
 }

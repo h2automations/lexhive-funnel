@@ -3,10 +3,11 @@ import { expect, type Page, type Route } from '@playwright/test';
 /**
  * The shared vocabulary of the funnel.
  *
- * Four suites drive the same seven screens. The question wording, the option
- * labels, the contact fields and the completion headings live here once, so a
- * copy change is one edit rather than four — and a suite that still passes
- * after a question was reworded is a suite that was not really looking.
+ * Four suites drive the same six question screens. The question wording, the
+ * option labels, the state picker, the contact fields and the completion
+ * headings live here once, so a copy change is one edit rather than four — and
+ * a suite that still passes after a question was reworded is a suite that was
+ * not really looking.
  *
  * Nothing here asserts a business rule. These are the primitives; the
  * assertions belong in the spec files, next to the reason they exist.
@@ -41,31 +42,27 @@ export const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f
 
 export const Q = {
   age: 'Are you between 18 and 64 years old?',
-  gender: 'What is your gender?',
   state: 'Which state do you live in?',
   work: 'Are you unable to work because of a medical condition?',
-  duration: 'Has this condition lasted, or is it expected to last, 12 months or longer?',
-  doctor: 'Are you currently under a doctor’s care for this condition?',
-  months: 'Have you worked 20+ years (roughly 40 quarters) in your working life?',
+  duration: 'Has your condition lasted—or is it expected to last—at least 12 months?',
+  workHistory: 'Have you worked 20 of the last 40 quarters (roughly 5 of the last 10 years)?',
+  doctor: 'Are you seeing a doctor for this condition?',
 } as const;
 
-/** The seven question screens in funnel order. */
+/** The six question screens in funnel order. */
 export const QUESTION_SCREENS: { heading: string }[] = [
   { heading: Q.age },
-  { heading: Q.gender },
   { heading: Q.state },
   { heading: Q.work },
   { heading: Q.duration },
+  { heading: Q.workHistory },
   { heading: Q.doctor },
-  { heading: Q.months },
 ];
 
 export const CONTACT_HEADING = 'A few details to finish';
 export const RESTRICTED_HEADING = 'Thank you for answering';
 export const DONE_HEADING = 'Thank you';
-
-/** Every knockout question answered so the lead qualifies. */
-export const QUALIFYING_ANSWERS = ['Yes', 'Prefer not to say', 'Texas', 'Yes', 'Yes', 'Yes', 'Yes'] as const;
+export const NOMATCH_HEADING = 'This service may not be a match';
 
 // ---------------------------------------------------------------------------
 // Test data
@@ -132,7 +129,18 @@ export async function answerQuestion(page: Page, option: string, nextHeading: st
 }
 
 /**
- * Answer all seven questions so the lead qualifies, landing on the contact
+ * The state screen is a native picker behind an explicit confirm — select a
+ * state, press "Check availability", and expect the next screen. The server
+ * decides the verdict; this just waits on whatever heading the UI lands on.
+ */
+export async function selectState(page: Page, label: string, nextHeading: string): Promise<void> {
+  await page.locator('#state-picker').selectOption({ label });
+  await page.getByRole('button', { name: 'Check availability', exact: true }).click();
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText(nextHeading);
+}
+
+/**
+ * Answer all six questions so the lead qualifies, landing on the contact
  * step. `expectHeading` is the heading the last answer should produce: the
  * contact step normally, or the restricted screen when the caller has
  * deliberately broken the state lookup.
@@ -141,10 +149,12 @@ export async function answerAllQualifying(
   page: Page,
   expectHeading: string = CONTACT_HEADING
 ): Promise<void> {
-  const nextHeadings = [...QUESTION_SCREENS.slice(1).map((s) => s.heading), expectHeading];
-  for (let i = 0; i < QUALIFYING_ANSWERS.length; i++) {
-    await answerQuestion(page, QUALIFYING_ANSWERS[i]!, nextHeadings[i]!);
-  }
+  await answerQuestion(page, 'Yes', Q.state); // age
+  await selectState(page, 'Texas', Q.work); // state
+  await answerQuestion(page, 'Yes', Q.duration); // work
+  await answerQuestion(page, 'Yes', Q.workHistory); // duration
+  await answerQuestion(page, 'Yes', Q.doctor); // workHistory
+  await answerQuestion(page, 'Yes', expectHeading); // doctor
 }
 
 export async function fillContact(page: Page, contact: Contact): Promise<void> {
@@ -152,16 +162,16 @@ export async function fillContact(page: Page, contact: Contact): Promise<void> {
   // substring match would resolve to two elements.
   await page.getByLabel('First name', { exact: true }).fill(contact.firstName);
   await page.getByLabel('Last name', { exact: true }).fill(contact.lastName);
-  await page.getByLabel('Email', { exact: true }).fill(contact.email);
+  await page.getByLabel('Email (optional)', { exact: true }).fill(contact.email);
   await page.getByLabel('Phone', { exact: true }).fill(contact.phone);
-  await page.getByLabel('ZIP code', { exact: true }).fill(contact.zip);
+  await page.getByLabel('ZIP code (optional)', { exact: true }).fill(contact.zip);
 }
 
 /** Fill the contact step and submit, without waiting on the outcome. */
 export async function submitContact(page: Page, contact: Contact): Promise<void> {
   await fillContact(page, contact);
   await page.getByRole('checkbox').check();
-  await page.getByRole('button', { name: 'Submit', exact: true }).click();
+  await page.getByRole('button', { name: 'Request a callback', exact: true }).click();
 }
 
 // ---------------------------------------------------------------------------

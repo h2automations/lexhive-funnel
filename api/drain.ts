@@ -36,6 +36,17 @@ const MAX_BACKOFF_MS = 1_800_000; // 32m ceiling
 
 const FETCH_TIMEOUT_MS = 10_000;
 
+/**
+ * Overall deadline for one drain invocation, including time spent reading
+ * results. The n8n caller times out at 30s, so a batch of ten sequential
+ * ten-second requests would starve the n8n side of the stack; the deadline is
+ * what makes a slow destination cost only the rows after it, never everything.
+ * Rows that fall out the far side of the deadline stay `delivering` and are
+ * reclaimed by the next run after the lease expires. Set
+ * `DRAIN_DEADLINE_MS` to match the deployment's own max duration.
+ */
+const DRAIN_DEADLINE_MS = Number(process.env.DRAIN_DEADLINE_MS ?? 25_000);
+
 interface OutboxRow {
   id: number;
   lead_id: string;
@@ -52,6 +63,8 @@ interface DeliveryResult {
   ok: boolean;
   retryable: boolean;
   message?: string;
+  /** The exact CAPI event Meta accepted, for audit and the e2e suite. */
+  sent?: Record<string, unknown>;
 }
 
 /** Constant-time compare so a wrong secret can't be found byte by byte. */
@@ -80,13 +93,20 @@ async function claimBatch(limit = BATCH_SIZE): Promise<OutboxRow[]> {
   return (data ?? []) as OutboxRow[];
 }
 
+/**
+ * Read one lead. Returns the row and any query error separately: a failed read
+ * is a retryable delivery problem, while an absent row is a permanent
+ * `lead_not_found`. Collapsing the two (as an earlier version did) turned a
+ * transient database blip into a dead letter.
+ */
 async function loadLead(leadId: string) {
-  const { data } = await supabase.from('leads').select('*').eq('id', leadId).maybeSingle();
-  return data;
+  const { data, error } = await supabase.from('leads').select('*').eq('id', leadId).maybeSingle();
+  return { data, error };
 }
 
 async function deliverMeta(row: OutboxRow): Promise<DeliveryResult> {
-  const lead = await loadLead(row.lead_id);
+  const { data: lead, error: leadError } = await loadLead(row.lead_id);
+  if (leadError) return { ok: false, retryable: true, message: 'db_read_failed' };
   if (!lead) return { ok: false, retryable: false, message: 'lead_not_found' };
 
   const baseUrl = (process.env.PUBLIC_BASE_URL || '').replace(/\/+$/, '');
@@ -126,6 +146,9 @@ async function deliverMeta(row: OutboxRow): Promise<DeliveryResult> {
     testEventCode: process.env.META_TEST_EVENT_CODE,
     eventSourceUrl: baseUrl ? `${baseUrl}/${lead.variant}` : undefined,
     limitedDataUse: restricted,
+    // Same ceiling as the n8n webhook: one hung destination must not starve
+    // the rest of the batch.
+    timeoutMs: FETCH_TIMEOUT_MS,
   });
 }
 
@@ -140,7 +163,8 @@ async function deliverN8n(row: OutboxRow): Promise<DeliveryResult> {
     return { ok: false, retryable: true, message: 'airtable_base_id_not_configured' };
   }
 
-  const lead = await loadLead(row.lead_id);
+  const { data: lead, error: leadError } = await loadLead(row.lead_id);
+  if (leadError) return { ok: false, retryable: true, message: 'db_read_failed' };
   if (!lead) return { ok: false, retryable: false, message: 'lead_not_found' };
 
   const common = {
@@ -155,25 +179,36 @@ async function deliverN8n(row: OutboxRow): Promise<DeliveryResult> {
     submitted_at: lead.submitted_at,
   };
 
-  // Restricted leads: contact fields never leave this process. The n8n workflow
-  // strips them again on its side — two layers, because the cost of the second
-  // one is a Code node and the cost of missing it is a compliance incident.
-  const body =
-    lead.disposition === 'restricted'
-      ? { ...common, restricted: true }
-      : {
-          ...common,
-          restricted: false,
-          first_name: lead.first_name,
-          last_name: lead.last_name,
-          email: lead.email,
-          phone: lead.phone,
-          gender: lead.gender,
-          zip: lead.zip,
-          utm_source: lead.utm_source,
-          utm_campaign: lead.utm_campaign,
-          has_fbc: Boolean(lead.fbc),
-        };
+  // Since follow-up exists there are now TWO contact-bearing reasons to reach
+  // n8n — a qualified sales lead and a disqualified nurture opt-in — and two
+  // explicit no-contact ones. Restricted AND disqualified-no-opt-in: contact
+  // fields never leave this process (a federation side-guard; the store also
+  // refuses to enqueue their jobs). The payload carries `lead_type`
+  // (Sales | Nurture | None) so the n8n workflow branches on that, never on
+  // disposition alone.
+  const followUpType = lead.follow_up_type ?? 'none';
+  const isNurture = lead.disposition === 'disqualified' && followUpType === 'disqualified_nurture';
+  const contactAllowed = lead.disposition === 'qualified' || isNurture;
+
+  const body = contactAllowed
+    ? {
+        ...common,
+        restricted: false,
+        lead_type: isNurture ? 'Nurture' : 'Sales',
+        first_name: lead.first_name,
+        last_name: lead.last_name,
+        email: lead.email,
+        phone: lead.phone,
+        ...(lead.gender ? { gender: lead.gender } : {}),
+        zip: lead.zip,
+        utm_source: lead.utm_source,
+        utm_campaign: lead.utm_campaign,
+        has_fbc: Boolean(lead.fbc),
+        follow_up_type: followUpType,
+        contact_capture_reason: lead.contact_capture_reason ?? null,
+        qualification_reason: lead.qualification_reason ?? null,
+      }
+    : { ...common, restricted: true, lead_type: 'None' };
 
   // Without a timeout a hung webhook holds the drain open until Vercel kills
   // the whole invocation, taking the other nine rows in the batch with it.
@@ -270,8 +305,22 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const summary: Record<string, number> = {};
   let deadLettered = 0;
   let failed = 0;
+  let skipped = 0;
+  let unresolved = 0;
+  const deadlineAt = Date.now() + DRAIN_DEADLINE_MS;
 
-  for (const row of claimed) {
+  for (let i = 0; i < claimed.length; i++) {
+    const row = claimed[i]!;
+
+    if (Date.now() >= deadlineAt) {
+      skipped = claimed.length - i;
+      log.warn('drain.deadline_reached', {
+        elapsed_ms: log.elapsed(),
+        remaining: skipped,
+      });
+      break;
+    }
+
     // The request id that created this outbox row, so the whole life of one
     // lead — submission, three failed attempts, eventual success — shares a
     // single correlation id in the drain.
@@ -282,6 +331,33 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       attempt: row.attempts,
       origin_request_id: (row.payload?.request_id as string) ?? null,
     });
+
+    /**
+     * Persist a delivery outcome ONLY if this invocation still owns the lease
+     * and the exact claim generation. An expired worker must not overwrite a
+     * newer worker's result — stale success would both mask a real failure and
+     * double-deliver a lead it no longer has authority to report on.
+     */
+    const persistOutcome = async (patch: Record<string, unknown>, now: string): Promise<boolean> => {
+      const { error } = await supabase
+        .from('delivery_outbox')
+        .update({ ...patch, updated_at: now })
+        .eq('id', row.id)
+        .eq('status', 'delivering')
+        .eq('attempts', row.attempts);
+      if (error) {
+        rowLog.error('delivery.bookkeeping_failed', error, {
+          patch_status: (patch.status as string | undefined) ?? null,
+        });
+        void reportError(error, {
+          tags: { area: 'delivery', route: 'drain', error_code: 'bookkeeping_failed' },
+          extra: { outbox_id: row.id, lead_id: row.lead_id, attempts: row.attempts },
+          requestId: log.requestId,
+        });
+        return false;
+      }
+      return true;
+    };
 
     const startedAt = Date.now();
     let result: DeliveryResult;
@@ -311,10 +387,29 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const queueLatencyMs = Date.now() - new Date(row.created_at).getTime();
 
     if (result.ok) {
-      await supabase
-        .from('delivery_outbox')
-        .update({ status: 'succeeded', updated_at: now, last_error: null })
-        .eq('id', row.id);
+      const patch: Record<string, unknown> = { status: 'succeeded', last_error: null };
+      // Audit the exact (already-hashed) event Meta accepted, separate from the
+      // enqueue metadata so the plaintext never lands in the same blob.
+      if (result.sent) patch.payload = { ...row.payload, delivered: result.sent };
+      const persisted = await persistOutcome(patch, now);
+      if (!persisted) {
+        // The destination accepted the event but the record of it did not
+        // commit. The row stays leased and is reclaimed and AT LEAST ONCE
+        // redelivered (Meta dedup / Airtable upsert make that safe). Do NOT
+        // count it as succeeded — bookkeeping failure is not delivery success.
+        unresolved += 1;
+        events.add('delivery.unresolved', {
+          lead_id: row.lead_id,
+          outbox_id: row.id,
+          destination: row.destination,
+          attempt: row.attempts,
+          duration_ms: durationMs,
+          outcome: 'bookkeeping_failed',
+          error_code: 'bookkeeping_failed',
+          detail: { queue_latency_ms: queueLatencyMs },
+        });
+        continue;
+      }
 
       summary[row.destination] = (summary[row.destination] ?? 0) + 1;
       rowLog.info('delivery.succeeded', {
@@ -341,10 +436,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const errorCode = classifyError(result.message);
 
     if (!result.retryable || exhausted) {
-      await supabase
-        .from('delivery_outbox')
-        .update({ status: 'dead', last_error: result.message ?? null, updated_at: now })
-        .eq('id', row.id);
+      const persisted = await persistOutcome(
+        { status: 'dead', last_error: result.message ?? null },
+        now
+      );
+      if (!persisted) {
+        unresolved += 1;
+        continue;
+      }
 
       deadLettered += 1;
       rowLog.error('delivery.dead', undefined, {
@@ -379,15 +478,18 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const baseMs = Math.min(60_000 * 2 ** (attempts - 1), MAX_BACKOFF_MS);
     const nextAttemptAt = new Date(Date.now() + baseMs * (0.7 + Math.random() * 0.6));
 
-    await supabase
-      .from('delivery_outbox')
-      .update({
+    const persisted = await persistOutcome(
+      {
         status: 'failed',
         last_error: result.message ?? null,
         next_attempt_at: nextAttemptAt.toISOString(),
-        updated_at: now,
-      })
-      .eq('id', row.id);
+      },
+      now
+    );
+    if (!persisted) {
+      unresolved += 1;
+      continue;
+    }
 
     failed += 1;
     // A retry is expected behaviour, not an incident — warn, don't error, and
@@ -418,12 +520,19 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     succeeded: Object.values(summary).reduce((total, n) => total + n, 0),
     failed,
     dead_lettered: deadLettered,
+    unresolved,
+    skipped,
     duration_ms: log.elapsed(),
   });
 
   await events.flush();
 
-  return res
-    .status(200)
-    .json({ processed: claimed.length, summary, deadLettered, requestId: log.requestId });
+  return res.status(200).json({
+    processed: claimed.length,
+    summary,
+    deadLettered,
+    unresolved,
+    skipped,
+    requestId: log.requestId,
+  });
 }

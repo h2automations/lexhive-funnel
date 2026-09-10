@@ -23,7 +23,9 @@
         "operation": "getAll",
         "tableId": "app_config",
         "returnAll": true,
-        "options": {}
+        "options": {
+          "alwaysOutputData": true
+        }
       },
       "id": "load-config",
       "name": "Load config",

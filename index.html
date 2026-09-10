@@ -1,28 +1,22 @@
 <!doctype html>
 <html lang="en">
   <head>
-    <!-- Google Tag Manager. Every tag — Meta Pixel, GA4, Clarity — is
-         configured in this container. The app pushes to the dataLayer and GTM
-         decides who hears about it; see src/lib/datalayer.ts. -->
-    <script>(function(w,d,s,l,i){w[l]=w[l]||[];w[l].push({'gtm.start':
-    new Date().getTime(),event:'gtm.js'});var f=d.getElementsByTagName(s)[0],
-    j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
-    'https://www.googletagmanager.com/gtm.js?id='+i+dl;f.parentNode.insertBefore(j,f);
-    })(window,document,'script','dataLayer','GTM-P34XGVL3');</script>
-
+    <!-- Google Tag Manager is loaded from src/main.tsx, not here: the container
+         must NOT load on the /ops surface (internal page; no marketing tags may
+         fire from it), and a static snippet in index.html cannot see the SPA
+         route. Every tag — Meta Pixel, GA4, Clarity — is configured in the
+         container; the app pushes to the dataLayer and GTM decides who hears
+         about it; see src/lib/datalayer.ts. -->
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Social Security Disability Benefits — Check If You Qualify</title>
-    <meta name="description" content="Answer six questions to find out if you may qualify for Social Security disability benefits. Free and no obligation." />
+    <title>Social Security Disability Support — See If Our Service May Be a Match</title>
+    <meta name="description" content="Answer a few short questions to find out whether our disability support service may be a match for you. This is not an application for benefits — free and no obligation." />
   </head>
   <body>
-    <!-- GTM fallback. The Meta noscript pixel that used to sit here is gone:
-         tag firing belongs in the container now, and a hardcoded second copy
-         of the dataset id is a thing that drifts. It cost nothing either way —
-         this funnel is a React app, so a visitor without JavaScript cannot
-         complete it. -->
-    <noscript><iframe src="https://www.googletagmanager.com/ns.html?id=GTM-P34XGVL3"
-      height="0" width="0" style="display:none;visibility:hidden"></iframe></noscript>
+    <!-- The Meta noscript pixel that used to be here is gone: tag firing belongs
+         in the container now, and a hardcoded second copy of the dataset id is
+         a thing that drifts. It cost nothing either way — this funnel is a
+         React app, so a visitor without JavaScript cannot complete it. -->
 
     <div id="root"></div>
 

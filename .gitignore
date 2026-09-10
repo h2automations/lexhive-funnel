@@ -14,3 +14,6 @@ supabase/seed-app-config.sql
 .locktrash/
 .lt/
 Claude outputs/
+
+# temp lock artifacts
+.tmp_locks/

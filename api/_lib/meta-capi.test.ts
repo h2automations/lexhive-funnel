@@ -74,6 +74,41 @@ test('identifiers are normalized before hashing', async () => {
   }
 });
 
+test('the request envelope is exactly data + test_event_code + access_token', async () => {
+  // Sandbox events are a debug aid, so the flag lives at the REQUEST level next
+  // to `data`, where it cannot leak into an event object that could later be
+  // sent against a real pixel. `access_token` travels in the same envelope —
+  // body, never query string — and the test asserts the event object stays
+  // clean of both.
+  const { calls, restore } = stubFetch({ ok: true, status: 200, json: { events_received: 1 } });
+
+  try {
+    await sendMetaEvent({
+      ...baseArgs,
+      eventId: 'event-1',
+      testEventCode: 'TEST12345',
+      userData: { em: 'a@b.com', ph: '4155550134' },
+    });
+
+    const body = calls[0]!.body;
+    assert.equal(body.access_token, 'test-token');
+    assert.equal(body.test_event_code, 'TEST12345');
+    assert.ok(body.data, 'data envelopes the events');
+    assert.deepEqual(
+      Object.keys(body).sort(),
+      ['access_token', 'data', 'test_event_code'],
+      'no stray keys on the request envelope'
+    );
+
+    const event = body.data[0] as Record<string, unknown>;
+    assert.ok(!('test_event_code' in event), 'sandbox flag must not sit inside an event');
+    assert.ok(!('access_token' in event), 'token must not sit inside an event');
+    assert.equal(event.event_id, 'event-1');
+  } finally {
+    restore();
+  }
+});
+
 test('gender normalizes to m or f, and opting out sends nothing', async () => {
   for (const [input, expected] of [['Male', 'm'], ['f', 'f'], ['FEMALE', 'f'], ['m', 'm']] as const) {
     const { calls, restore } = stubFetch({ ok: true, status: 200, json: { events_received: 1 } });
@@ -239,6 +274,27 @@ test('a network failure is retryable — it says nothing about the event', async
   try {
     const result = await sendMetaEvent({ ...baseArgs, userData: {} });
     assert.equal(result.retryable, true);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test('a hung exchange aborts and is retried, not dead-lettered', async () => {
+  // Without a timeout the drain worker could sit on a stalled socket past the
+  // n8n caller's own 30s limit and get killed mid-attempt — the one failure
+  // mode where the attempt budget burns and NO outcome is recorded.
+  const original = globalThis.fetch;
+  globalThis.fetch = ((_url: string, init: RequestInit) =>
+    new Promise((_, reject) => {
+      (init.signal as AbortSignal).addEventListener('abort', () => reject(new Error('aborted')));
+    })) as unknown as typeof fetch;
+
+  try {
+    const started = Date.now();
+    const result = await sendMetaEvent({ ...baseArgs, userData: {}, timeoutMs: 50 });
+    assert.equal(result.ok, false);
+    assert.equal(result.retryable, true);
+    assert.ok(Date.now() - started < 2_000, 'the abort fires, it does not hang forever');
   } finally {
     globalThis.fetch = original;
   }

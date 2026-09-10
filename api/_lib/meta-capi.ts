@@ -14,6 +14,8 @@ export interface CapiResult {
   retryable: boolean;
   message?: string;
   received?: boolean;
+  /** The exact event Meta accepted (already hashed); the drain audits it. */
+  sent?: Record<string, unknown>;
 }
 
 function sha256(value: string): string {
@@ -84,10 +86,21 @@ interface CapiPayload {
   user_data: Record<string, unknown>;
   action_source: string;
   event_source_url?: string;
-  test_event_code?: string;
   data_processing_options?: string[];
   data_processing_options_country?: number;
   data_processing_options_state?: number;
+}
+
+/**
+ * The request envelope matches Meta's SDK: `test_event_code` sits BESIDE `data`
+ * at the request level, not on an individual event. Placing it on the event
+ * (as this file historically did) can prevent the Test Events workflow from
+ * operating at all while returning HTTP 200, so it was never visible.
+ */
+interface CapiEnvelope {
+  data: CapiPayload[];
+  test_event_code?: string;
+  access_token: string;
 }
 
 /** Hash if there is something left after normalizing; otherwise omit the key. */
@@ -111,6 +124,13 @@ export async function sendMetaEvent(args: {
   testEventCode?: string;
   eventSourceUrl?: string;
   actionSource?: string;
+  /**
+   * Whole-exchange deadline, including reading the response. Without one a hung
+   * Meta endpoint holds the drain invocation open and starves the rest of the
+   * batch (drain.ts), and inline delivery (lead.ts) that the caller bounded.
+   * The timer is not cleared until the body is consumed.
+   */
+  timeoutMs?: number;
   /**
    * Unix seconds of the ORIGINAL conversion, not of this delivery attempt.
    *
@@ -136,6 +156,7 @@ export async function sendMetaEvent(args: {
     eventSourceUrl,
     actionSource = 'website',
     limitedDataUse = false,
+    timeoutMs = 10_000,
     eventTime,
   } = args;
 
@@ -177,7 +198,6 @@ export async function sendMetaEvent(args: {
   };
 
   if (eventSourceUrl) payload.event_source_url = eventSourceUrl;
-  if (testEventCode) payload.test_event_code = testEventCode;
 
   if (limitedDataUse) {
     // LDU: Meta processes the event in restricted mode. 0/0 lets Meta infer
@@ -187,36 +207,47 @@ export async function sendMetaEvent(args: {
     payload.data_processing_options_state = 0;
   }
 
+  const envelope: CapiEnvelope = { data: [payload], access_token: accessToken };
+  if (testEventCode) envelope.test_event_code = testEventCode;
+
   const url = `https://graph.facebook.com/${apiVersion}/${pixelId}/events`;
 
+  // One deadline for request AND response: an abort after the headers arrived
+  // but mid-body aborts the body read too, which is the hung case that matters.
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
   let res: Response;
+  let body: { events_received?: number; error?: { message?: string } } = {};
   try {
     res = await fetch(url, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       // The token goes in the body, not the query string, so it cannot end up
       // in an intermediary's request log.
-      body: JSON.stringify({ data: [payload], access_token: accessToken }),
+      body: JSON.stringify(envelope),
+      signal: controller.signal,
     });
+
+    if (res.status === 429 || res.status >= 500) {
+      return { ok: false, retryable: true, message: `HTTP ${res.status}` };
+    }
+
+    body = (await res.json().catch(() => ({}))) as typeof body;
   } catch (err) {
-    return {
-      ok: false,
-      retryable: true,
-      message: err instanceof Error ? err.message : 'network error',
-    };
+    const message =
+      err instanceof Error && err.name === 'AbortError'
+        ? 'request timed out'
+        : err instanceof Error
+          ? err.message
+          : 'network error';
+    return { ok: false, retryable: true, message };
+  } finally {
+    clearTimeout(timer);
   }
-
-  if (res.status === 429 || res.status >= 500) {
-    return { ok: false, retryable: true, message: `HTTP ${res.status}` };
-  }
-
-  const body = (await res.json().catch(() => ({}))) as {
-    events_received?: number;
-    error?: { message?: string };
-  };
 
   if (res.ok && body.events_received && body.events_received >= 1) {
-    return { ok: true, retryable: false, received: true };
+    return { ok: true, retryable: false, received: true, sent: { ...payload } };
   }
 
   return {

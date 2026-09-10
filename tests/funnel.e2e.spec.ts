@@ -2,8 +2,10 @@ import { expect, test, type ConsoleMessage, type Page } from '@playwright/test';
 import {
   APP_HOST,
   FUNNEL_PATH,
+  NOMATCH_HEADING,
   Q,
   QUESTION_SCREENS,
+  RESTRICTED_HEADING,
   UUID_RE,
   VARIANT,
   answerQuestion,
@@ -11,6 +13,7 @@ import {
   fillContact,
   makeContact,
   readDataLayer,
+  selectState,
   waitForCompleteResponse,
   waitForFunnelReady,
   type Contact,
@@ -66,10 +69,9 @@ function assertDataLayerClean(dl: unknown[], contact: Contact): void {
   const appEntries = dl.filter((e) => {
     if (!e || typeof e !== 'object') return false;
     const event = (e as Record<string, unknown>).event;
-    return typeof event === 'string' && (
-      event.startsWith('funnel_') ||
-      event.startsWith('application_') ||
-      event.startsWith('qualified_')
+    return (
+      typeof event === 'string' &&
+      (event.startsWith('funnel_') || event.startsWith('application_') || event.startsWith('qualified_'))
     );
   });
   const text = JSON.stringify(appEntries);
@@ -81,19 +83,15 @@ function assertDataLayerClean(dl: unknown[], contact: Contact): void {
     [contact.lastName, 'the test last name'],
     ['between 18 and 64', 'the age question text'],
     ['medical condition', 'medical-condition wording'],
-    ['doctor’s care', 'doctor-care wording'],
+    ['seeing a doctor', 'doctor-care wording'],
     ['12 months', 'duration wording'],
     ['40 quarters', 'work-history wording'],
     ['age', 'the age question id'],
-    ['gender', 'the gender question id'],
     ['state', 'the state question id'],
     ['work', 'the work question id'],
     ['duration', 'the duration question id'],
+    ['workHistory', 'the work-history question id'],
     ['doctor', 'the doctor question id'],
-    ['months', 'the months question id'],
-    ['Prefer not to say', 'a consent-declining answer'],
-    ['Male', 'a gender answer'],
-    ['Female', 'a gender answer'],
     ['Yes', 'a binary answer'],
     ['No', 'a binary answer'],
     ['Texas', 'the state Texas'],
@@ -200,9 +198,9 @@ function waitForCompleteRequest(page: Page) {
 }
 
 /**
- * The partial save triggered by answering the state question. It is matched by
- * the answer set being exactly {age, gender, state}: later partial saves carry
- * the accumulated state answer but additional keys, so they cannot collide.
+ * The partial save triggered by confirming the state question. It is matched
+ * by the answer set being exactly {age, state}: only the age and state saves
+ * have ever been sent at that point, so additional keys cannot collide.
  */
 function waitForStatePartial(page: Page, stateValue: string) {
   return page.waitForResponse(async (res) => {
@@ -213,7 +211,7 @@ function waitForStatePartial(page: Page, stateValue: string) {
         answers?: { state?: { a?: string } };
       };
       const answers = body?.answers ?? {};
-      return body?.status === 'partial' && answers?.state?.a === stateValue && Object.keys(answers).length === 3;
+      return body?.status === 'partial' && answers?.state?.a === stateValue && Object.keys(answers).length === 2;
     } catch {
       return false;
     }
@@ -252,13 +250,12 @@ test('2 — qualified Texas submission', async ({ page }) => {
   await waitForFunnelReady(page);
   await expect(page.getByRole('heading', { level: 1 })).toHaveText(Q.age);
 
-  // age / gender / state / work / duration / doctor / months — all qualifying.
-  await answerQuestion(page, 'Yes', Q.gender);
-  await answerQuestion(page, 'Prefer not to say', Q.state);
-  await answerQuestion(page, 'Texas', Q.work);
+  // age / state / work / duration / workHistory / doctor — all qualifying.
+  await answerQuestion(page, 'Yes', Q.state);
+  await selectState(page, 'Texas', Q.work);
   await answerQuestion(page, 'Yes', Q.duration);
+  await answerQuestion(page, 'Yes', Q.workHistory);
   await answerQuestion(page, 'Yes', Q.doctor);
-  await answerQuestion(page, 'Yes', Q.months);
   await answerQuestion(page, 'Yes', 'A few details to finish');
 
   await fillContact(page, contact);
@@ -266,24 +263,23 @@ test('2 — qualified Texas submission', async ({ page }) => {
 
   // Observe the completion request/response without touching it.
   const completeResponse = waitForCompleteResponse(page);
-  await page.getByRole('button', { name: 'Submit', exact: true }).click();
+  await page.getByRole('button', { name: 'Request a callback', exact: true }).click();
   const res = await completeResponse;
 
   expect(res.status()).toBe(200);
   const result = await res.json();
   expect(result.leadId).toMatch(UUID_RE);
   expect(result.eventId).toMatch(UUID_RE);
-  expect(result.leadId === result.eventId || result.leadId !== result.eventId).toBe(true);
   expect(result.disposition).toBe('qualified');
 
   await expect(page.getByRole('heading', { level: 1 })).toHaveText('Thank you');
-  await expect(page.getByText(/A benefits specialist may contact you/i)).toBeVisible();
+  await expect(page.getByText(/A specialist will review your answers/i)).toBeVisible();
 
-  // All seven ordinals, exactly once each, fired as the funnel was answered.
+  // All six ordinals, exactly once each, fired as the funnel was answered.
   const dl = await readDataLayer(page);
   const steps = eventsNamed(dl, 'funnel_step');
-  expect(steps).toHaveLength(7);
-  expect(steps.map((s) => s.step_number).sort((a, b) => Number(a) - Number(b))).toEqual([1, 2, 3, 4, 5, 6, 7]);
+  expect(steps).toHaveLength(6);
+  expect(steps.map((s) => s.step_number).sort((a, b) => Number(a) - Number(b))).toEqual([1, 2, 3, 4, 5, 6]);
   expect(steps.every((s) => s.variant === VARIANT)).toBe(true);
 
   const submitted = assertExactlyOne(eventsNamed(dl, 'application_submitted'), 'application_submitted');
@@ -295,7 +291,7 @@ test('2 — qualified Texas submission', async ({ page }) => {
   assertObserversClean(obs);
 });
 
-test('3 — disqualified submission fires no optimization event', async ({ page }) => {
+test('3 — a knockout exit collects nothing and fires no conversion event', async ({ page }) => {
   const obs = attachObserver(page);
   const contact = makeContact('dq');
 
@@ -303,41 +299,46 @@ test('3 — disqualified submission fires no optimization event', async ({ page 
   await waitForFunnelReady(page);
   await expect(page.getByRole('heading', { level: 1 })).toHaveText(Q.age);
 
-  // One knockout answer ("No" on work); everything else qualifying.
-  await answerQuestion(page, 'Yes', Q.gender);
-  await answerQuestion(page, 'Prefer not to say', Q.state);
-  await answerQuestion(page, 'Texas', Q.work);
-  await answerQuestion(page, 'No', Q.duration);
-  await answerQuestion(page, 'Yes', Q.doctor);
-  await answerQuestion(page, 'Yes', Q.months);
-  await answerQuestion(page, 'Yes', 'A few details to finish');
-
-  await fillContact(page, contact);
-  await page.getByRole('checkbox').check();
-
+  // One knockout answer ("No" on work) ends the questioning immediately: no
+  // more questions and no contact form. The person then chooses an exit on
+  // the non-match screen; "No thanks" finalises WITHOUT storing anything.
+  await answerQuestion(page, 'Yes', Q.state);
+  await selectState(page, 'Texas', Q.work);
   const completeResponse = waitForCompleteResponse(page);
-  await page.getByRole('button', { name: 'Submit', exact: true }).click();
+  await answerQuestion(page, 'No', NOMATCH_HEADING);
+
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText(NOMATCH_HEADING);
+
+  // The exit must not ask for a single contact field on the choice screen.
+  for (const label of ['First name', 'Last name', 'Phone', 'Email', 'ZIP code (optional)']) {
+    await expect(page.getByLabel(label, { exact: true }), `knockout exit must not show ${label}`).toHaveCount(0);
+  }
+
+  await page.getByRole('button', { name: 'No thanks', exact: true }).click();
   const res = await completeResponse;
 
   expect(res.status()).toBe(200);
   const result = await res.json();
   expect(result.leadId).toMatch(UUID_RE);
-  expect(result.eventId).toMatch(UUID_RE);
   expect(result.disposition).toBe('disqualified');
 
-  await expect(page.getByRole('heading', { level: 1 })).toHaveText('Thank you');
-
+  // No conversion event of any kind: `leadSubmitted` (which pushes
+  // `application_submitted` and, for qualified leads, `qualified_lead`) is
+  // deliberately never called on the knockout path.
   const dl = await readDataLayer(page);
-  assertExactlyOne(eventsNamed(dl, 'application_submitted'), 'application_submitted');
-  // No Meta-Lead-optimization browser event: qualified_lead is gated to
-  // qualifying leads only, so a disqualified lead must never see it.
-  expect(eventsNamed(dl, 'qualified_lead'), 'disqualified leads must not fire qualified_lead').toHaveLength(0);
+  expect(eventsNamed(dl, 'application_submitted'), 'knockout exits must not fire application_submitted').toHaveLength(0);
+  expect(eventsNamed(dl, 'qualified_lead'), 'knockout exits must not fire qualified_lead').toHaveLength(0);
+
+  // Exactly the ordinals that were answered — the knockout answer itself is
+  // step number 3 (work) and must be present; nothing after it may exist.
+  const steps = eventsNamed(dl, 'funnel_step');
+  expect(steps.map((s) => s.step_number).sort((a, b) => Number(a) - Number(b))).toEqual([1, 2, 3]);
 
   assertDataLayerClean(dl, contact);
   assertObserversClean(obs);
 });
 
-test('4 — restricted New York flow collects no contact details', async ({ page }) => {
+test('4 — restricted New York collects no contact details', async ({ page }) => {
   const obs = attachObserver(page);
   const contact = makeContact('ny');
 
@@ -345,27 +346,20 @@ test('4 — restricted New York flow collects no contact details', async ({ page
   await waitForFunnelReady(page);
   await expect(page.getByRole('heading', { level: 1 })).toHaveText(Q.age);
 
-  await answerQuestion(page, 'Yes', Q.gender);
-  await answerQuestion(page, 'Prefer not to say', Q.state);
+  await answerQuestion(page, 'Yes', Q.state);
 
   // The server decides restriction; the client only renders the verdict.
   const statePartial = waitForStatePartial(page, 'NY');
-  await page.getByRole('button', { name: 'New York', exact: true }).click();
-  await expect(page.getByRole('heading', { level: 1 })).toHaveText(Q.work);
+  await selectState(page, 'New York', RESTRICTED_HEADING);
 
   const stateRes = await statePartial;
   expect(stateRes.status()).toBe(200);
   expect((await stateRes.json()).disposition).toBe('restricted');
 
-  await answerQuestion(page, 'Yes', Q.duration);
-  await answerQuestion(page, 'Yes', Q.doctor);
-  await answerQuestion(page, 'Yes', Q.months);
-  await answerQuestion(page, 'Yes', 'Thank you for answering');
-
   // Restricted completion path: no contact inputs at all.
-  await expect(page.getByRole('heading', { level: 1 })).toHaveText('Thank you for answering');
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText(RESTRICTED_HEADING);
   await expect(page.getByText(/not able to pass your details/i)).toBeVisible();
-  for (const label of ['First name', 'Last name', 'Email', 'Phone', 'ZIP code']) {
+  for (const label of ['First name', 'Last name', 'Phone', 'Email (optional)', 'ZIP code (optional)']) {
     await expect(
       page.getByLabel(label, { exact: true }),
       `restricted flow must not show ${label}`
@@ -376,7 +370,7 @@ test('4 — restricted New York flow collects no contact details', async ({ page
 
   const completeRequest = waitForCompleteRequest(page);
   const completeResponse = waitForCompleteResponse(page);
-  await page.getByRole('button', { name: 'Submit', exact: true }).click();
+  await page.getByRole('button', { name: 'Continue', exact: true }).click();
 
   // The final request must not carry a single contact field.
   const finalBody = (await completeRequest).postDataJSON() as { contact?: unknown; consent?: { given?: boolean } };
@@ -394,6 +388,11 @@ test('4 — restricted New York flow collects no contact details', async ({ page
   const dl = await readDataLayer(page);
   assertExactlyOne(eventsNamed(dl, 'application_submitted'), 'application_submitted');
   expect(eventsNamed(dl, 'qualified_lead'), 'restricted leads must not fire qualified_lead').toHaveLength(0);
+
+  // Restricted exits after the state screen, so only ordinals 1 (age) and
+  // 2 (state confirm) may exist.
+  const steps = eventsNamed(dl, 'funnel_step');
+  expect(steps.map((s) => s.step_number).sort((a, b) => Number(a) - Number(b))).toEqual([1, 2]);
 
   assertDataLayerClean(dl, contact);
   assertObserversClean(obs);
@@ -471,16 +470,25 @@ test('6 — every screen is accessible and the submit holds', async ({ page }) =
   await waitForFunnelReady(page);
   await expectHeading(Q.age);
 
-  // Drive the whole funnel with the keyboard: Tab to the first option button,
-  // Enter to answer, and verify the focus lands on each successive heading.
+  // Drive the whole funnel with the keyboard: Tab to the first focusable
+  // control, Enter to answer, and verify the focus lands on each successive
+  // heading. The state screen is the exception — its control is the picker,
+  // so Tab lands on the SELECT rather than an option button.
   for (let i = 0; i < QUESTION_SCREENS.length; i++) {
     await expectProgressBar();
     await page.keyboard.press('Tab');
-    const tag = await page.evaluate(
-      () => (document.activeElement as HTMLElement | null)?.tagName ?? ''
-    );
-    expect(tag, 'Tab from the heading must land on an option button').toBe('BUTTON');
-    await page.keyboard.press('Enter');
+    const tag = await page.evaluate(() => (document.activeElement as HTMLElement | null)?.tagName ?? '');
+    if (i === 1) {
+      expect(tag, 'Tab from the state heading must land on the picker').toBe('SELECT');
+      await page.locator('#state-picker').selectOption({ value: 'TX' });
+      await page.keyboard.press('Tab'); // to the confirm button
+      const buttonTag = await page.evaluate(() => (document.activeElement as HTMLElement | null)?.tagName ?? '');
+      expect(buttonTag, 'Tab after the picker must land on the availability button').toBe('BUTTON');
+      await page.keyboard.press('Enter');
+    } else {
+      expect(tag, 'Tab from the heading must land on an option button').toBe('BUTTON');
+      await page.keyboard.press('Enter');
+    }
 
     if (i < QUESTION_SCREENS.length - 1) {
       await expectHeading(QUESTION_SCREENS[i + 1]!.heading);
@@ -490,7 +498,7 @@ test('6 — every screen is accessible and the submit holds', async ({ page }) =
   }
 
   await expectProgressBar();
-  for (const label of ['First name', 'Last name', 'Email', 'Phone', 'ZIP code']) {
+  for (const label of ['First name', 'Last name', 'Email (optional)', 'Phone', 'ZIP code (optional)']) {
     const input = page.getByLabel(label, { exact: true });
     await expect(input).toBeVisible();
     await expect(input).toBeEnabled();
@@ -519,16 +527,17 @@ test('6 — every screen is accessible and the submit holds', async ({ page }) =
 
   await fillContact(page, contact);
   await page.getByRole('checkbox').check();
-  await page.getByRole('button', { name: 'Submit', exact: true }).click();
+  await page.getByRole('button', { name: 'Request a callback', exact: true }).click();
 
   await expect.poll(async () => held).toBe(true);
-  const submitButton = page.getByRole('button', { name: /Submit/ });
-  await expect(submitButton).toBeDisabled();
-  await expect(submitButton).toHaveText('Submitting…');
+  // The click flips the button to "Submitting…" immediately, so the held
+  // submit is asserted by its transient name while the request is open.
+  const submitting = page.getByRole('button', { name: 'Submitting…', exact: true });
+  await expect(submitting).toBeDisabled();
 
   release?.();
   await expect(page.getByRole('heading', { level: 1 })).toHaveText('Thank you');
-  await expect(page.getByText(/A benefits specialist may contact you/i)).toBeVisible();
+  await expect(page.getByText(/A specialist will review your answers/i)).toBeVisible();
 
   assertObserversClean(obs);
 });

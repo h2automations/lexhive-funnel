@@ -26,8 +26,14 @@ export type Answers = Record<string, Answer | undefined>;
 /**
  * Any "No" here ends the qualification. `age` is included: the original
  * version asked the question and then ignored the answer.
+ *
+ * `workHistory` is the SSA work-credit rule stated as quarters: benefit
+ * entitlement needs 20 quarters of coverage in the 40 quarters before onset
+ * (roughly 5 of the last 10 years), not "20 years of work" as a prior revision
+ * asked. It is still a knockout — a "No" means no credits, which means no
+ * benefit entitlement.
  */
-export const KNOCKOUT_QUESTIONS = ['age', 'work', 'duration', 'doctor', 'months'] as const;
+export const KNOCKOUT_QUESTIONS = ['age', 'work', 'duration', 'workHistory', 'doctor'] as const;
 
 /**
  * Returned when a state was answered but could not be resolved to a real code.
@@ -82,6 +88,24 @@ export function stateCodeFrom(answers: Answers): string | null {
 /** True when any knockout question was answered "No". */
 export function isDisqualified(answers: Answers): boolean {
   return KNOCKOUT_QUESTIONS.some((id) => answers[id]?.a === 'No');
+}
+
+/**
+ * Machine-readable reason for an early exit, so follow-up can be tuned without
+ * re-reading answer text. The FIRST knockout answer in question order decides;
+ * later answers are moot. Null means the answers have not been disqualified.
+ */
+export function qualificationReasonFor(answers: Answers): string | null {
+  const firstKnockout = KNOCKOUT_QUESTIONS.find((id) => answers[id]?.a === 'No');
+  if (!firstKnockout) return null;
+  const reasons: Record<typeof KNOCKOUT_QUESTIONS[number], string> = {
+    age: 'age_out_of_range',
+    work: 'unable_to_work_not_met',
+    duration: 'condition_duration_not_met',
+    workHistory: 'insufficient_work_history',
+    doctor: 'no_current_medical_care',
+  };
+  return reasons[firstKnockout];
 }
 
 /**

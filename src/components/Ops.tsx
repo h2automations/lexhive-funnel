@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useState, type FormEvent } from 'react';
 
 /**
  * Operations view. The reason this exists rather than "check the Supabase
@@ -47,6 +47,7 @@ export default function Ops() {
   const [data, setData] = useState<OpsData | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<number | null>(null);
+  const [checking, setChecking] = useState(false);
 
   const load = useCallback(async (k: string) => {
     if (!k) return;
@@ -63,6 +64,8 @@ export default function Ops() {
       setError(null);
       sessionStorage.setItem('lh_ops_key', k);
     } catch {
+      // A 503 means the database is unreachable — a live problem, not a login
+      // problem, so keep the key.
       setError('Could not load delivery status.');
     }
   }, []);
@@ -76,15 +79,35 @@ export default function Ops() {
     return () => clearInterval(t);
   }, [key, load]);
 
+  async function login(e: FormEvent) {
+    e.preventDefault();
+    if (!key.trim()) return;
+    setChecking(true);
+    try {
+      await load(key.trim());
+    } finally {
+      setChecking(false);
+    }
+  }
+
   async function replay(id: number) {
     setBusy(id);
     try {
-      await fetch('/api/ops', {
+      const res = await fetch('/api/ops', {
         method: 'POST',
         headers: { 'content-type': 'application/json', 'x-ops-key': key },
         body: JSON.stringify({ outboxId: id }),
       });
+      if (!res.ok) {
+        // Replay without proof is the classic silent failure: the button looks
+        // clicked, nothing was requeued, and nobody notices.
+        setError('Replay failed — the row was not requeued. Refresh and try again.');
+        return;
+      }
+      setError(null);
       await load(key);
+    } catch {
+      setError('Replay failed — could not reach the delivery service.');
     } finally {
       setBusy(null);
     }
@@ -95,13 +118,7 @@ export default function Ops() {
       <main className="ops">
         <h1>Delivery operations</h1>
         <p className="ops-muted">Enter the ops key to view delivery status.</p>
-        <form
-          className="ops-keyrow"
-          onSubmit={(e) => {
-            e.preventDefault();
-            void load(key);
-          }}
-        >
+        <form className="ops-keyrow" onSubmit={login}>
           <label className="sr-only" htmlFor="ops-key">
             Ops key
           </label>
@@ -114,8 +131,8 @@ export default function Ops() {
             placeholder="Ops key"
             onChange={(e) => setKey(e.target.value)}
           />
-          <button className="ops-btn" type="submit">
-            View
+          <button className="ops-btn" type="submit" disabled={checking}>
+            {checking ? 'Checking…' : 'View'}
           </button>
         </form>
         {error && <p className="ops-error">{error}</p>}
@@ -129,6 +146,8 @@ export default function Ops() {
   return (
     <main className="ops">
       <h1>Delivery operations</h1>
+
+      {error && <p className="ops-error">{error}</p>}
 
       <section className="ops-cards">
         <Stat label="Completed leads" value={data.funnel.complete} />
@@ -151,11 +170,11 @@ export default function Ops() {
         <tbody>
           {data.health?.map((h, i) => (
             <tr key={i}>
-              <td>{h.destination}</td>
-              <td>
+              <td data-label="Destination">{h.destination}</td>
+              <td data-label="Status">
                 <span className={`pill pill-${h.status}`}>{h.status}</span>
               </td>
-              <td>{h.rows}</td>
+              <td data-label="Rows">{h.rows}</td>
             </tr>
           ))}
         </tbody>
@@ -180,15 +199,15 @@ export default function Ops() {
           <tbody>
             {data.metrics.map((m) => (
               <tr key={m.destination}>
-                <td>{m.destination}</td>
-                <td>{m.succeeded}</td>
-                <td>{m.failed}</td>
-                <td>{m.dead}</td>
-                <td>{ms(m.p50_ms)}</td>
+                <td data-label="Destination">{m.destination}</td>
+                <td data-label="Succeeded">{m.succeeded}</td>
+                <td data-label="Retried">{m.failed}</td>
+                <td data-label="Dead">{m.dead}</td>
+                <td data-label="p50">{ms(m.p50_ms)}</td>
                 {/* p95, not an average: an average is dominated by the fast
                     majority and hides the tail you actually care about. */}
-                <td>{ms(m.p95_ms)}</td>
-                <td>{ms(m.max_queue_latency_ms)}</td>
+                <td data-label="p95">{ms(m.p95_ms)}</td>
+                <td data-label="Worst queue wait">{ms(m.max_queue_latency_ms)}</td>
               </tr>
             ))}
           </tbody>
@@ -213,16 +232,16 @@ export default function Ops() {
           <tbody>
             {data.problems.map((p) => (
               <tr key={p.id}>
-                <td className="mono">{p.lead_id.slice(0, 8)}</td>
-                <td>{p.destination}</td>
-                <td>
+                <td className="mono" data-label="Lead">{p.lead_id.slice(0, 8)}</td>
+                <td data-label="Destination">{p.destination}</td>
+                <td data-label="Status">
                   <span className={`pill pill-${p.status}`}>{p.status}</span>
                 </td>
-                <td>
+                <td data-label="Attempts">
                   {p.attempts}/{p.max_attempts ?? 6}
                 </td>
-                <td className="ops-err">{p.last_error?.slice(0, 120)}</td>
-                <td>
+                <td className="ops-err" data-label="Last error">{p.last_error?.slice(0, 120)}</td>
+                <td data-label="">
                   <button
                     className="ops-btn ops-btn-sm"
                     disabled={busy === p.id}
@@ -250,12 +269,12 @@ export default function Ops() {
         <tbody>
           {data.recent?.map((r) => (
             <tr key={r.id}>
-              <td className="mono">{r.lead_id.slice(0, 8)}</td>
-              <td>{r.destination}</td>
-              <td>
+              <td className="mono" data-label="Lead">{r.lead_id.slice(0, 8)}</td>
+              <td data-label="Destination">{r.destination}</td>
+              <td data-label="Status">
                 <span className={`pill pill-${r.status}`}>{r.status}</span>
               </td>
-              <td>{new Date(r.updated_at).toLocaleTimeString()}</td>
+              <td data-label="Updated">{new Date(r.updated_at).toLocaleTimeString()}</td>
             </tr>
           ))}
         </tbody>

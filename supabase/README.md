@@ -43,7 +43,7 @@ Read-only. Nine checks; every row should read `ok`.
 ```
 check_name                      status        detail
 tables                          ok            app_config, app_events, delivery_outbox, leads, state_rules
-leads columns                   ok            consent_given, consent_text, gender, submission_id
+leads columns                   ok            consent_given, consent_text, event_id, submission_id
 functions                       ok            claim_outbox_batch, delivery_metrics, lead_counts, reconcile_missing_outbox
 outbox_health view              ok            the /ops surface reads this
 outbox_health security_invoker  ok            anon must not read past RLS through the view

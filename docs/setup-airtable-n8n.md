@@ -10,7 +10,7 @@ mismatch fails at the Airtable node rather than anywhere useful.
 
 ## 1. Airtable base
 
-Create a base called **LexHive Leads** with two tables.
+Create a base called **LexHive Leads** with three tables.
 
 ### Table: `Leads`
 
@@ -49,6 +49,29 @@ data would still be there.
 | `Consent Version` | Single line text |
 | `Submitted At` | Date (include time) |
 
+### Table: `Nurture`
+
+Disqualified opt-ins — people who did not qualify but explicitly asked to be
+contacted about *other* programs. Contact is separated from the `Leads` table by
+intent, not by a flag: the two are different relationships, and mixing them
+makes the sales team's base look like everyone who ever filled the form in.
+
+| Field | Type |
+|---|---|
+| `Lead ID` | Single line text (**primary**) |
+| `Variant` | Single line text |
+| `First Name` | Single line text |
+| `Email` | Email |
+| `Phone` | Phone number |
+| `State` | Single line text |
+| `Disposition` | Single select |
+| `Consent Version` | Single line text |
+| `Consent At` | Date (include time) |
+| `Submitted At` | Date (include time) |
+| `Follow-Up Type` | Single line text — `disqualified_nurture` |
+| `Contact Capture Reason` | Single line text — `disqualified_optional_nurture` |
+| `Qualification Reason` | Single line text — e.g. `insufficient_work_history` |
+
 Then: **Airtable → Builder hub → Personal access tokens**. Create one with
 `data.records:read`, `data.records:write` and `schema.bases:read`, scoped to
 this base only. Copy the base ID from the URL (`airtable.com/appXXXXXXXX/…`).
@@ -69,7 +92,10 @@ in n8n credentials; it must never be included in the webhook body.
 **Lead routing workflow.** Activate it, then copy the production webhook URL
 from the Webhook node — that value is `N8N_WEBHOOK_URL` in the next step. Check
 the flow reads Webhook → Restricted state? → *(true)* Strip contact fields →
-Airtable Restricted, *(false)* Flatten payload → Airtable Leads.
+Airtable Restricted, *(false)* Flatten payload → Nurture or Sales? →
+*(Sales)* Airtable Leads, *(Nurture)* Airtable Nurture. The branch key is
+`lead_type`, set by `api/drain.ts` — the workflow branches on the payload the
+server computed, and never recalculates a disposition.
 
 **Outbox drain workflow.** Its config comes from Supabase, not from n8n
 environment variables. This instance runs with `N8N_BLOCK_ENV_ACCESS_IN_NODE`

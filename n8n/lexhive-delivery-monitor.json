@@ -24,7 +24,9 @@
         "operation": "getAll",
         "tableId": "app_config",
         "returnAll": true,
-        "options": {}
+        "options": {
+          "alwaysOutputData": true
+        }
       },
       "id": "monitor-config",
       "name": "Load config",
@@ -35,7 +37,8 @@
         "supabaseApi": {
           "name": "LexHive Supabase (service role)"
         }
-      }
+      },
+      "notes": "alwaysOutputData: without it, an empty config table emits no items, the downstream 'Assess' node never runs, and the monitor ends quietly. A missing config row is itself a degraded state."
     },
     {
       "parameters": {
@@ -54,7 +57,8 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [400, 0],
-      "notes": "neverError so a 503 — which is the whole point of this workflow — is read rather than thrown. /api/health needs no secret: it returns three ages and a count, and a health check that needs a credential is one nobody wires up."
+      "onError": "continueRegularOutput",
+      "notes": "neverError so a 503 — which is the whole point of this workflow — is read rather than thrown. onError continues on network-level failures too (DNS, connection refused): those must reach the Assess node and be classified degraded, not stop the workflow before it can alert. /api/health needs no secret: it returns three ages and a count, and a health check that needs a credential is one nobody wires up."
     },
     {
       "parameters": {

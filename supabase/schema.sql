@@ -47,12 +47,30 @@ create table if not exists public.leads (
 alter table public.leads add column if not exists consent_text  text;
 alter table public.leads add column if not exists consent_given boolean;
 
--- Meta advanced-matching key `ge`. Stored as given ('m' | 'f' | 'undisclosed');
--- the CAPI client normalizes and drops anything that isn't m or f.
-alter table public.leads add column if not exists gender text;
+-- `gender` was a Meta advanced-matching key on a question that no longer
+-- exists: the UX review removed gender from the funnel because it was a match
+-- key, not a knockout question. No code has written it since, and nothing reads
+-- it, so it is dropped rather than leaving a column the schema claims and the
+-- application contradicts.
+alter table public.leads drop column if exists gender;
+
 alter table public.leads add column if not exists submission_id uuid;
+-- A plain unique index, NOT a partial one: /api/lead races two first saves by
+-- upserting ON CONFLICT (submission_id), and Postgres will not use a partial
+-- index as an ON CONFLICT target. Duplicate NULLs are still allowed, so the
+-- column staying nullable is unaffected.
 create unique index if not exists leads_submission_id_uniq
-  on public.leads (submission_id) where submission_id is not null;
+  on public.leads (submission_id);
+
+-- ---- Disqualified follow-up (nuture) ------------------------------------
+-- A disqualified user may OPT IN to future contact; they never become a
+-- qualified sales lead. These columns record that separate relationship and
+-- why the person did not qualify anyway.
+alter table public.leads add column if not exists follow_up_opt_in       boolean;
+alter table public.leads add column if not exists follow_up_type         text;      -- qualified_sales | disqualified_nurture | none
+alter table public.leads add column if not exists follow_up_consent_at   timestamptz;
+alter table public.leads add column if not exists contact_capture_reason text;      -- qualified_application | disqualified_optional_nurture | null
+alter table public.leads add column if not exists qualification_reason   text;      -- machine-readable knockout, e.g. insufficient_work_history
 
 create index if not exists leads_status_idx  on public.leads (status);
 create index if not exists leads_disp_idx    on public.leads (disposition);
@@ -127,12 +145,23 @@ returns int language plpgsql as $$
 declare
   inserted_count int;
 begin
+  -- ONLY leads that reach a pipeline get their delivery rows recreated.
+  -- Restricted and disqualified-no-opt-in leads carry NO delivery (and no
+  -- contact) by design; recreating an n8n row here would quietly route a
+  -- person who must not be sold to a buyer. Qualified and disqualified
+  -- nurture opt-ins are the two contact-bearing relationships.
   insert into public.delivery_outbox (lead_id, destination, payload)
   select l.id, 'n8n_airtable', jsonb_build_object('lead_id', l.id)
     from public.leads l
    where l.status = 'complete'
+     and (l.disposition = 'qualified'
+          or (l.disposition = 'disqualified' and l.follow_up_type = 'disqualified_nurture'))
   on conflict (lead_id, destination) do nothing;
 
+  -- Qualified leads fire the `Lead` conversion. Nurture opt-ins fire the
+  -- separate NurtureOptIn event with its own event_id namespace so it can
+  -- never collide with a qualified Lead's id. Restricted and
+  -- disqualified-no-opt-in send nothing to Meta at all.
   insert into public.delivery_outbox (lead_id, destination, payload)
   select l.id, 'meta_capi', jsonb_build_object(
     'event_id', l.event_id,
@@ -141,6 +170,17 @@ begin
     from public.leads l
    where l.status = 'complete'
      and l.disposition = 'qualified'
+  on conflict (lead_id, destination) do nothing;
+
+  insert into public.delivery_outbox (lead_id, destination, payload)
+  select l.id, 'meta_capi', jsonb_build_object(
+    'event_id', concat('nurture_', l.id),
+    'event_name', 'NurtureOptIn'
+  )
+    from public.leads l
+   where l.status = 'complete'
+     and l.disposition = 'disqualified'
+     and l.follow_up_type = 'disqualified_nurture'
   on conflict (lead_id, destination) do nothing;
 
   get diagnostics inserted_count = row_count;
@@ -174,20 +214,38 @@ returns table (
 declare
   v_lease interval := interval '5 minutes';
 begin
-  -- Release anything whose lease has expired (worker crashed mid-flight).
+  -- Release anything whose lease has expired (worker crashed mid-flight) — but
+  -- only if the attempt budget remains. A worker that repeatedly crashes before
+  -- recording a result must NOT be reclaimed forever: resetting every expired
+  -- `delivering` row to `pending` (as an earlier version did) let a row at
+  -- max_attempts be claimed again, increment past its budget, and loop
+  -- indefinitely. Exhausted expired leases are dead-lettered here instead.
+  update public.delivery_outbox
+     set status = 'dead',
+         last_error = 'lease_expired at max attempts',
+         updated_at = now()
+   where status = 'delivering'
+     and updated_at < now() - v_lease
+     and attempts >= max_attempts;
+
   update public.delivery_outbox
      set status = 'pending',
          updated_at = now()
    where status = 'delivering'
      and updated_at < now() - v_lease;
 
-  -- Claim the next batch atomically.
+  -- Claim the next batch atomically. `attempts < max_attempts` is belt-and-
+  -- braces: nothing should ever be pending at max_attempts, but if it is, it
+  -- must not consume a claim slot. Note this is AT LEAST ONCE by design: a
+  -- destination can accept a request before a worker crashes, so reclamation
+  -- can redeliver; destination idempotency stays necessary.
   return query
     with claimed as (
       select o.id
         from public.delivery_outbox o
        where o.status in ('pending', 'failed')
          and o.next_attempt_at <= now()
+         and o.attempts < o.max_attempts
        order by o.next_attempt_at asc
        limit batch_size
        for update of o skip locked
@@ -215,11 +273,11 @@ returns table (
   disqualified bigint
 ) language sql stable as $$
   select
-    count(*) filter (where status = 'partial')            as partial,
-    count(*) filter (where status = 'complete')           as complete,
-    count(*) filter (where disposition = 'qualified')     as qualified,
-    count(*) filter (where disposition = 'restricted')    as restricted,
-    count(*) filter (where disposition = 'disqualified')  as disqualified
+    count(*) filter (where status = 'partial')                                as partial,
+    count(*) filter (where status = 'complete')                               as complete,
+    count(*) filter (where status = 'complete' and disposition = 'qualified') as qualified,
+    count(*) filter (where status = 'complete' and disposition = 'restricted') as restricted,
+    count(*) filter (where status = 'complete' and disposition = 'disqualified') as disqualified
   from public.leads;
 $$;
 

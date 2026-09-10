@@ -19,11 +19,11 @@ with results (ord, check_name, status, detail) as (
 
   union all
   select 2, 'leads columns',
-         case when count(*) = 4 then 'ok' else 'MISSING' end,
+         case when count(*) = 5 then 'ok' else 'MISSING' end,
          string_agg(column_name, ', ' order by column_name)
   from information_schema.columns
   where table_schema = 'public' and table_name = 'leads'
-    and column_name in ('gender', 'submission_id', 'consent_text', 'consent_given')
+    and column_name in ('submission_id', 'consent_text', 'consent_given', 'event_id', 'follow_up_opt_in')
 
   union all
   select 3, 'functions',

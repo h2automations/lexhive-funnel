@@ -1,5 +1,6 @@
 import Funnel from './components/Funnel';
 import Ops from './components/Ops';
+import Privacy from './components/Privacy';
 
 /**
  * Deliberately no router dependency. Two routes do not justify react-router,
@@ -14,6 +15,7 @@ export default function App() {
   const path = window.location.pathname.replace(/^\/+|\/+$/g, '');
 
   if (path === 'ops') return <Ops />;
+  if (path === 'privacy') return <Privacy variant="qualification-v1" />;
 
   return <Funnel variant={path || 'qualification-v1'} />;
 }

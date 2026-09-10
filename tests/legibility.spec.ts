@@ -1,5 +1,5 @@
 import { expect, test, type Locator } from '@playwright/test';
-import { Q, answerAllQualifying, answerQuestion, blockThirdPartyTags, gotoFunnel } from './support/funnel';
+import { Q, answerAllQualifying, answerQuestion, blockThirdPartyTags, gotoFunnel, selectState } from './support/funnel';
 
 /**
  * The design decisions that carry the conversion rate.
@@ -47,11 +47,15 @@ test.describe('legibility and input ergonomics', () => {
 
     await check(Q.age);
 
-    // The state question renders fifty options as a scrolling list, which is
-    // the layout most likely to have been shrunk to fit.
-    await answerQuestion(page, 'Yes', Q.gender);
-    await answerQuestion(page, 'Prefer not to say', Q.state);
-    await check(Q.state);
+    // The state screen is a picker behind a confirm — the ones most likely to
+    // have been shrunk to fit a small phone.
+    await answerQuestion(page, 'Yes', Q.state);
+    const picker = page.locator('#state-picker');
+    expect((await picker.boundingBox())?.height).toBeGreaterThanOrEqual(63);
+    expect((await page.getByRole('button', { name: 'Check availability' }).boundingBox())?.height).toBeGreaterThanOrEqual(63);
+
+    await selectState(page, 'Texas', Q.work);
+    await check(Q.work);
   });
 
   test('an enlarged device font actually enlarges the page', async ({ page }) => {
@@ -115,8 +119,10 @@ test.describe('legibility and input ergonomics', () => {
     // almost entirely phones.
     expect(await overflow(), 'the first question overflows the viewport').toBeLessThanOrEqual(1);
 
-    await answerQuestion(page, 'Yes', Q.gender);
-    await answerQuestion(page, 'Prefer not to say', Q.state);
-    expect(await overflow(), 'the state list overflows the viewport').toBeLessThanOrEqual(1);
+    await answerQuestion(page, 'Yes', Q.state);
+    expect(await overflow(), 'the state picker overflows the viewport').toBeLessThanOrEqual(1);
+
+    await selectState(page, 'Texas', Q.work);
+    expect(await overflow(), 'the work question overflows the viewport').toBeLessThanOrEqual(1);
   });
 });

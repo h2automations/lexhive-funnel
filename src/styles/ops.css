@@ -2,6 +2,24 @@
    internal tool, and density beats warmth when you are scanning for the
    one row that is broken. */
 
+/*
+ * The palette this file references throughout. Kept next to the surface
+ * instead of in a shared sheet because no other view shares it — and a token
+ * that is only ever used by one file is a named constant, not a system.
+ *
+ * Values align with the funnel's grays and blues so a single-brand feeling
+ * holds across a public funnel and a private dashboard.
+ */
+:root {
+  --ink: #1a202c;
+  --ink-soft: #5b6b79;
+  --paper: #f7fafc;
+  --line: #dbe2e8;
+  --action: #2b6cb0;
+  --alert: #c53030;
+  --wash: #ebf4ff;
+}
+
 .ops {
   max-width: 68rem;
   margin: 0 auto;
@@ -100,3 +118,45 @@
 }
 
 .ops-foot { margin-top: 3rem; color: var(--ink-soft); font-size: 0.8125rem; }
+
+/* The tables are monitoring surfaces, not documents: on a phone the columns
+   that matter are "what is wrong" and "since when". Collapse to a card stack
+   so a small screen reads the recovery list instead of panning sideways. */
+@media (max-width: 720px) {
+  .ops {
+    padding: 1.5rem 0.75rem 3rem;
+  }
+
+  .ops-table thead {
+    display: none;
+  }
+
+  .ops-table tr {
+    display: block;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 0.5rem 0.75rem;
+    margin-bottom: 0.5rem;
+    background: #fff;
+  }
+
+  .ops-table td {
+    display: block;
+    border-bottom: none;
+    padding: 0.1875rem 0;
+  }
+
+  .ops-table td::before {
+    content: attr(data-label);
+    display: inline-block;
+    width: min(35%, 7.5rem);
+    color: var(--ink-soft);
+    font-size: 0.75rem;
+    font-weight: 600;
+  }
+
+  .ops-err {
+    max-width: none;
+    overflow-wrap: anywhere;
+  }
+}

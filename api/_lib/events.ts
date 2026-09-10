@@ -37,12 +37,14 @@ export type EventName =
   | 'lead.created'
   | 'lead.updated'
   | 'lead.completed'
+  | 'lead.duplicate_ignored'
   | 'lead.rejected'
   | 'outbox.enqueued'
   | 'delivery.attempted'
   | 'delivery.succeeded'
   | 'delivery.failed'
   | 'delivery.dead'
+  | 'delivery.unresolved'
   | 'delivery.replayed'
   | 'drain.completed';
 

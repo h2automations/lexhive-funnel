@@ -4,7 +4,6 @@ import {
   DONE_HEADING,
   Q,
   QUESTION_SCREENS,
-  RESTRICTED_HEADING,
   UUID_RE,
   answerAllQualifying,
   answerQuestion,
@@ -12,6 +11,7 @@ import {
   gotoFunnel,
   isLeadPost,
   makeContact,
+  selectState,
   submitContact,
   waitForCompleteResponse,
 } from './support/funnel';
@@ -121,30 +121,46 @@ test.describe('resilience', () => {
     // Still on the form, with the typing intact and the button usable again.
     await expect(page.getByRole('heading', { level: 1 })).toHaveText(CONTACT_HEADING);
     await expect(page.getByRole('heading', { name: DONE_HEADING, exact: true })).toHaveCount(0);
-    await expect(page.getByRole('button', { name: 'Submit', exact: true })).toBeEnabled();
-    await expect(page.getByLabel('Email', { exact: true })).not.toBeEmpty();
+    await expect(page.getByRole('button', { name: 'Request a callback', exact: true })).toBeEnabled();
+    await expect(page.getByLabel('Email (optional)', { exact: true })).not.toBeEmpty();
   });
 
-  test('an unavailable compliance lookup fails closed', async ({ page }) => {
-    // Every save fails, so the server never returns a disposition.
+  test('an unavailable availability check fails closed with a retry, not a verdict', async ({ page }) => {
+    // Every save fails, so the server never returns a disposition for the
+    // state. The funnel must NOT treat "cannot check" as "we do not serve this
+    // state": it keeps the person on the picker, tells them to retry, and asks
+    // for no contact details until a verdict actually exists.
     await page.route('**/api/lead', (route) => route.fulfill({ status: 500, body: '{}' }));
 
     await gotoFunnel(page);
+    await answerQuestion(page, 'Yes', Q.state);
 
-    // The funnel still runs to the end: a save outage must never be the reason
-    // a person cannot finish...
-    await answerAllQualifying(page, RESTRICTED_HEADING);
-    await expect(page.getByRole('heading', { level: 1 })).toHaveText(RESTRICTED_HEADING);
+    await page.locator('#state-picker').selectOption({ value: 'TX' });
+    await page.getByRole('button', { name: 'Check availability', exact: true }).click();
 
-    // ...but with no verdict on the state, it must not ask for contact details.
-    // Failing open here would mean collecting a name and phone number in a
-    // state where passing them on is not allowed.
-    for (const label of ['First name', 'Last name', 'Email', 'Phone', 'ZIP code']) {
+    const alert = page.locator('p.error[role="alert"]');
+    await expect(alert).toHaveText(/could not check availability/i);
+
+    // Still on the state screen, picker usable, button usable — a retry, not
+    // an exit.
+    await expect(page.getByRole('heading', { level: 1 })).toHaveText(Q.state);
+    await expect(page.locator('#state-picker')).toBeEnabled();
+    await expect(page.getByRole('button', { name: 'Check availability', exact: true })).toBeEnabled();
+
+    // Without a verdict it must not ask for contact details. Failing open here
+    // would mean collecting a name and phone number in a state where passing
+    // them on is not allowed.
+    for (const label of ['First name', 'Last name', 'Phone', 'Email (optional)', 'ZIP code (optional)']) {
       await expect(
         page.getByLabel(label, { exact: true }),
         `asked for ${label} without a compliance verdict`
       ).toHaveCount(0);
     }
+
+    // When the lookup recovers, the SAME screen retries and proceeds.
+    await page.unroute('**/api/lead');
+    await page.getByRole('button', { name: 'Check availability', exact: true }).click();
+    await expect(page.getByRole('heading', { level: 1 })).toHaveText(Q.work);
   });
 
   test('a lead is captured with every marketing tag blocked', async ({ page }) => {
@@ -173,13 +189,13 @@ test.describe('resilience', () => {
     await answerAllQualifying(page);
 
     await page.getByRole('button', { name: 'Back', exact: true }).click();
-    await expect(page.getByRole('heading', { level: 1 })).toHaveText(Q.months);
+    await expect(page.getByRole('heading', { level: 1 })).toHaveText(Q.doctor);
 
     await answerQuestion(page, 'Yes', CONTACT_HEADING);
 
     // The qualified contact step only renders while the state verdict from the
     // earlier save is still held, so seeing the email field proves the earlier
     // answers survived the round trip rather than being reset.
-    await expect(page.getByLabel('Email', { exact: true })).toBeVisible();
+    await expect(page.getByLabel('Email (optional)', { exact: true })).toBeVisible();
   });
 });

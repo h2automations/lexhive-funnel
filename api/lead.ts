@@ -17,7 +17,8 @@ import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { createLogger, type Logger } from './_lib/log.js';
 import { reportError } from './_lib/sentry.js';
 import { createEventRecorder } from './_lib/events.js';
-import { stateCodeFrom, classify, type Answers } from './_lib/qualification.js';
+import { stateCodeFrom, classify, qualificationReasonFor, type Answers } from './_lib/qualification.js';
+import { decideFollowUp, enforceContactPolicy } from './_lib/follow-up.js';
 
 const supabase = createClient(
   process.env.SUPABASE_URL!,
@@ -28,9 +29,9 @@ const supabase = createClient(
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const VARIANT_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const MAX_ANSWERS_BYTES = 8_000;
-const REQUIRED_ANSWERS = ['age', 'gender', 'state', 'work', 'duration', 'doctor', 'months'] as const;
+const REQUIRED_ANSWERS = ['age', 'state', 'work', 'duration', 'workHistory', 'doctor'] as const;
 const YES_NO = new Set(['Yes', 'No']);
-const GENDERS = new Set(['m', 'f', 'undisclosed']);
+const BINARY_QUESTIONS = ['age', 'work', 'duration', 'workHistory', 'doctor'] as const;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 // Auto-drain: self-heals so a completed submission is not hostage to the
@@ -183,55 +184,97 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   // Resolved rather than truncated: `"New York".slice(0, 2)` is `"NE"`, and
   // Nebraska is unrestricted. See _lib/qualification.ts.
   const stateCode = stateCodeFrom(answers);
-  if (isComplete) {
+
+  // Restriction and disposition are decided before validation so an early-exit
+  // completion — restricted (exits after the state screen) or disqualified (the
+  // moment a knockout answer is "No") — is not held to the FULL answer set.
+  // Only a qualified completion must carry all six answers, valid binaries and
+  // a resolvable state; anything less is a funnel bug and worth a 400.
+  const restricted = await isRestricted(stateCode ?? '', log);
+  const disposition = classify({ answers, restricted });
+  const earlyExit = restricted || disposition === 'disqualified';
+
+  if (isComplete && !earlyExit) {
     const completeAnswers = REQUIRED_ANSWERS.every(
       (key) => typeof answers[key]?.a === 'string' && Boolean(answers[key]!.a!.trim())
     );
-    const validBinary = ['age', 'work', 'duration', 'doctor', 'months'].every((key) =>
-      YES_NO.has(answers[key]?.a ?? '')
-    );
-    if (!completeAnswers || !validBinary || !GENDERS.has(answers.gender?.a ?? '') || !stateCode || stateCode === 'ZZ') {
+    const validBinary = BINARY_QUESTIONS.every((key) => YES_NO.has(answers[key]?.a ?? ''));
+    if (!completeAnswers || !validBinary || !stateCode || stateCode === 'ZZ') {
       return reject('invalid_complete_answers');
     }
   }
-  const restricted = await isRestricted(stateCode ?? '', log);
-  const disposition = classify({ answers, restricted });
 
   const suppliedContact = (body.contact ?? {}) as Record<string, unknown>;
-  const contact = restricted ? {} : suppliedContact;
+  const suppliedConsent = (body.consent ?? {}) as Record<string, unknown>;
+  // Follow-up is server-authoritative. The browser's opt-in is the one thing
+  // policy trusts, and only for the disposition that actually exists: a
+  // restricted lead is stripped of ALL contact and consent regardless of what
+  // the body claims, and a disqualified no-opt-in never stores a contact.
+  const decision = decideFollowUp(disposition, body.followUpOptIn);
+
+  const enforcement = enforceContactPolicy({
+    disposition,
+    browserOptIn: body.followUpOptIn,
+    contact: suppliedContact,
+    consent: suppliedConsent,
+  });
+  if (!enforcement.ok) return reject(enforcement.reason);
+
+  const contact = enforcement.value.contact;
+  const consent = enforcement.value.consent;
+  const isNurture = decision.followUpType === 'disqualified_nurture';
   const email = truncate(contact.email, 320);
   const phone = truncate(contact.phone, 32);
 
-  // A restricted lead is completed WITHOUT contact details — the funnel never
-  // asks for them. Requiring an email or phone regardless made restricted
-  // submissions impossible to finish.
-  if (isComplete && !restricted && !email && !phone) {
-    // A spike here means the contact step is broken, not that users are being
-    // careless — worth watching as a rate, not reading as individual lines.
-    log.warn('lead.rejected', { reason: 'contact_required', variant, disposition });
-    events.add('lead.rejected', {
-      disposition,
-      state_code: stateCode || null,
-      error_code: 'contact_required',
-      duration_ms: log.elapsed(),
-    });
-    await events.flush();
-    return res.status(400).json({ error: 'contact_required' });
+  // Restricted exits require the no-contact ACKNOWLEDGMENT checked on the raw
+  // body first (the checkbox is "I understand", not contact consent); policy
+  // then strips everything anyway. A disqualified lead has no consent stage
+  // unless they opted into nurture, which enforceContactPolicy already gates.
+  if (isComplete && disposition === 'restricted' && suppliedConsent.given !== true) {
+    return reject('consent_required');
   }
-  if (isComplete && !restricted) {
+
+  // Phone-led contact capture: a callback service needs a phone number and a
+  // name to address the caller by. Email and ZIP are optional match/route keys.
+  // Restricted and disqualified no-opt-in completions carry NO contact here —
+  // and the row builder below only writes contact the disposition permits.
+  if (isComplete && (disposition === 'qualified' || isNurture)) {
     const phoneDigits = (phone ?? '').replace(/\D/g, '');
-    const validPhone = phoneDigits.length === 10 || (phoneDigits.length === 11 && phoneDigits.startsWith('1'));
-    const validZip = /^\d{5}$/.test(truncate(contact.zip, 10) ?? '');
-    const validNames = Boolean(truncate(contact.firstName, 100) && truncate(contact.lastName, 100));
-    if (!email || !EMAIL_RE.test(email) || !validPhone || !validZip || !validNames) {
+    const validPhone = !phone || phoneDigits.length === 10 || (phoneDigits.length === 11 && phoneDigits.startsWith('1'));
+    const firstName = truncate(contact.firstName, 100);
+    const lastName = truncate(contact.lastName, 100);
+    const emailOk = !email || EMAIL_RE.test(email);
+    const zipOk = !truncate(contact.zip, 10) || /^\d{5}$/.test(truncate(contact.zip, 10)!);
+
+    if (isNurture) {
+      // Minimal nurture contact: a name plus at least one reachable channel.
+      // Format rules match the sales path so a bad phone is a 400 either way.
+      const anyChannel = Boolean(email || phone);
+      if (!firstName || !anyChannel || (email && !emailOk) || (phone && !validPhone)) {
+        return reject('invalid_contact');
+      }
+    } else if (!firstName || !lastName || !validPhone) {
+      // A spike here means the contact step is broken, not that users are being
+      // careless — worth watching as a rate, not reading as individual lines.
+      log.warn('lead.rejected', { reason: 'contact_required', variant, disposition });
+      events.add('lead.rejected', {
+        disposition,
+        state_code: stateCode || null,
+        error_code: 'contact_required',
+        duration_ms: log.elapsed(),
+      });
+      await events.flush();
+      return res.status(400).json({ error: 'contact_required' });
+    } else if (!emailOk || !zipOk) {
       return reject('invalid_contact');
     }
   }
 
   const attr: Attribution = body.attribution ?? {};
   const now = new Date().toISOString();
-  const consent = (body.consent ?? {}) as Record<string, unknown>;
-  if (isComplete && consent.given !== true) {
+  // Nurture consent was enforced inside enforceContactPolicy; this gate is the
+  // qualified sales consent. Restricted acknowledgment was checked above.
+  if (isComplete && disposition === 'qualified' && consent.given !== true) {
     return reject('consent_required');
   }
 
@@ -247,11 +290,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     last_name: truncate(contact.lastName, 100),
     state: stateCode || null,
     zip: truncate(contact.zip, 10),
-    gender: truncate(answers.gender?.a, 20),
     consent_version: truncate(consent.version, 32),
     consent_text: truncate(consent.text, 2000),
     consent_given: typeof consent.given === 'boolean' ? consent.given : null,
     consent_at: truncate(consent.timestamp, 40),
+    follow_up_opt_in: decision.followUpOptIn,
+    follow_up_type: decision.followUpType,
+    follow_up_consent_at: isComplete && decision.followUpOptIn ? now : null,
+    contact_capture_reason: decision.contactCaptureReason,
+    qualification_reason: disposition === 'disqualified' ? qualificationReasonFor(answers) : null,
     submitted_at: isComplete ? now : null,
     first_seen_at: attr.firstSeenAt ? new Date(attr.firstSeenAt).toISOString() : null,
     fbclid: truncate(attr.fbclid, 512),
@@ -281,10 +328,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const existingId =
     typeof body.leadId === 'string' && UUID_RE.test(body.leadId) ? body.leadId : null;
 
-  let leadId = existingId;
-  let eventId: string | null = null;
-  let created = false;
-
   /** The durability boundary failing is the one thing here worth paging on. */
   async function failWrite(error: { message: string }) {
     log.error('lead.write_failed', error, { variant, disposition, existing: Boolean(existingId) });
@@ -296,49 +339,129 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return res.status(500).json({ error: 'db_write_failed', requestId: log.requestId });
   }
 
-  if (!leadId) {
+  // A completed lead is a terminal record. Its event id, conversion timestamp,
+  // consent artifact and finalized answers are the FIRST completion's, forever:
+  // a later partial save or an identical duplicate completion must not rewrite
+  // them (the browser's save queue is a convenience, not a server-side
+  // invariant). So the existing row is read by submission_id before ANY write.
+  const { data: bySubmission, error: bySubmissionError } = await supabase
+    .from('leads')
+    .select('id, event_id, status, submission_id')
+    .eq('submission_id', submissionId)
+    .maybeSingle();
+  if (bySubmissionError) return failWrite(bySubmissionError);
+
+  let existing = bySubmission ?? null;
+  if (!existing && existingId) {
     const { data, error } = await supabase
       .from('leads')
-      .select('id, event_id')
-      .eq('submission_id', submissionId)
+      .select('id, event_id, status, submission_id')
+      .eq('id', existingId)
       .maybeSingle();
     if (error) return failWrite(error);
-    if (data) {
-      leadId = data.id;
-      eventId = data.event_id;
+    // A leadId that belongs to a DIFFERENT submission is not a fall-through —
+    // it is one session writing over another's row.
+    if (data && data.submission_id && data.submission_id !== submissionId) {
+      return reject('lead_id_mismatch');
     }
+    existing = data ?? null;
+  }
+
+  let leadId: string | null = existing?.id ?? null;
+  let eventId: string | null = existing?.event_id ?? null;
+  let created = false;
+
+  /** Reply with the completion that is already on record, without touching it. */
+  async function returnExisting() {
+    events.add('lead.duplicate_ignored', {
+      lead_id: leadId,
+      disposition,
+      state_code: stateCode || null,
+      detail: { variant, existing_status: existing?.status ?? null },
+    });
+    log.info(isComplete ? 'lead.completed' : 'lead.saved', {
+      lead_id: leadId,
+      disposition,
+      state_code: stateCode || null,
+      variant,
+      created: false,
+      duration_ms: log.elapsed(),
+    });
+    await events.flush();
+    return res.status(200).json({ leadId, eventId, variant, disposition });
+  }
+
+  if (existing && existing.status === 'complete') {
+    return returnExisting();
   }
 
   if (leadId) {
-    const { data, error } = await supabase
+    // Finalization is guarded on the surviving lifecycle state: of two racing
+    // completions exactly one can flip status 'partial' → 'complete'; the loser
+    // matches no row and settles on the winner's result below rather than
+    // overwriting it.
+    let update = supabase
       .from('leads')
       .update(row)
       .eq('id', leadId)
-      .eq('submission_id', submissionId)
-      .select('id, event_id')
-      .maybeSingle();
+      .eq('submission_id', submissionId);
+    if (isComplete) update = update.eq('status', 'partial');
 
+    const { data, error } = await update.select('id, event_id, status').maybeSingle();
     if (error) return failWrite(error);
 
     if (data) {
       leadId = data.id;
       eventId = data.event_id;
     } else {
-      leadId = null; // id was stale (row purged); fall through to an insert
+      // Either a racing completion won (status no longer 'partial') or the row
+      // was purged mid-request. Re-read; never mutate what the race preserved.
+      const { data: current, error: reReadError } = await supabase
+        .from('leads')
+        .select('id, event_id, status')
+        .eq('submission_id', submissionId)
+        .maybeSingle();
+      if (reReadError) return failWrite(reReadError);
+      if (current) {
+        leadId = current.id;
+        eventId = current.event_id;
+        if (current.status === 'complete') {
+          existing = { ...current, submission_id: submissionId };
+          return returnExisting();
+        }
+      } else {
+        leadId = null; // id was stale (row purged); fall through to an insert
+      }
     }
   }
 
   if (!leadId) {
-    // Deterministic for this browser submission, so two racing first partial
-    // saves converge on the same row and event id.
+    // Deterministic for this browser submission, so two racing first saves
+    // converge on the same row and event id. Verification note (readiness
+    // review): a unique index does NOT make a racing insert return success —
+    // the conflict has to be handled, which is why this upserts rather than
+    // inserting, and re-reads the winner when a race is lost.
     leadId = submissionId;
     eventId = submissionId;
     created = true;
     const { error } = await supabase
       .from('leads')
-      .insert({ ...row, id: leadId, event_id: eventId, created_at: now });
+      .upsert(
+        { ...row, id: leadId, event_id: eventId, created_at: now },
+        { onConflict: 'submission_id', ignoreDuplicates: true }
+      );
 
     if (error) return failWrite(error);
+
+    const { data, error: readError } = await supabase
+      .from('leads')
+      .select('id, event_id')
+      .eq('submission_id', submissionId)
+      .maybeSingle();
+    if (readError) return failWrite(readError);
+    if (!data) return failWrite(new Error('lead row missing after insert'));
+    leadId = data.id;
+    eventId = data.event_id;
   }
 
   events.add(created ? 'lead.created' : 'lead.updated', {
@@ -349,28 +472,29 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     detail: { variant, step_count: Object.keys(answers).length },
   });
 
-  // ---- Enqueue outbox deliveries (only on complete) ------------------
+// ---- Enqueue outbox deliveries (only on complete) ------------------
   if (isComplete) {
-    const deliveries = [
-      ...(disposition === 'qualified'
-        ? [
-            {
-              lead_id: leadId,
-              destination: 'meta_capi',
-              // The originating request id rides along on the outbox row, so a
-              // delivery that succeeds forty minutes and three retries later can
-              // still be traced back to the submission that created it.
-              payload: { event_id: eventId, event_name: 'Lead', request_id: log.requestId },
-              status: 'pending',
-              attempts: 0,
-              max_attempts: 6,
-              next_attempt_at: now,
-              created_at: now,
-              updated_at: now,
-            },
-          ]
-        : []),
-      {
+    // Qualified and opted-in nurture get WORK. Disqualified-no-opt-in and
+    // restricted get none: no sales row, no nurture row, no Meta event —
+    // the spec's core rule is that those people are not leads, so nothing
+    // downstream is allowed to treat them as one.
+    const deliveries = [];
+    if (disposition === 'qualified') {
+      deliveries.push({
+        lead_id: leadId,
+        destination: 'meta_capi',
+        // The originating request id rides along on the outbox row, so a
+        // delivery that succeeds forty minutes and three retries later can
+        // still be traced back to the submission that created it.
+        payload: { event_id: eventId, event_name: 'Lead', request_id: log.requestId },
+        status: 'pending',
+        attempts: 0,
+        max_attempts: 6,
+        next_attempt_at: now,
+        created_at: now,
+        updated_at: now,
+      });
+      deliveries.push({
         lead_id: leadId,
         destination: 'n8n_airtable',
         payload: { lead_id: leadId, request_id: log.requestId },
@@ -380,32 +504,65 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         next_attempt_at: now,
         created_at: now,
         updated_at: now,
-      },
-    ];
-    const { error: outboxError } = await supabase.from('delivery_outbox').upsert(deliveries, {
-      onConflict: 'lead_id,destination',
-      ignoreDuplicates: true,
-    });
-
-    if (outboxError) {
-      // The lead is already safe. The drain's reconciliation pass recreates
-      // any missing delivery rows before it claims work.
-      log.error('outbox.enqueue_failed', outboxError, { lead_id: leadId });
-      await reportError(outboxError, {
-        tags: { area: 'delivery', route: 'lead' },
-        extra: { lead_id: leadId },
-        requestId: log.requestId,
       });
-    } else {
-      events.add('outbox.enqueued', {
+    } else if (disposition === 'disqualified' && decision.followUpOptIn) {
+      // A nurture opt-in is its own event, deliberately NOT the qualified
+      // `Lead` conversion: it must not train Meta to optimise for people who
+      // did not qualify. event_id is namespaced so it can never collide with
+      // a qualified Lead's id.
+      deliveries.push({
+        lead_id: leadId,
+        destination: 'meta_capi',
+        payload: {
+          event_id: `nurture_${leadId}`,
+          event_name: 'NurtureOptIn',
+          request_id: log.requestId,
+        },
+        status: 'pending',
+        attempts: 0,
+        max_attempts: 6,
+        next_attempt_at: now,
+        created_at: now,
+        updated_at: now,
+      });
+      deliveries.push({
+        lead_id: leadId,
+        destination: 'n8n_airtable',
+        payload: { lead_id: leadId, request_id: log.requestId, nurture: true },
+        status: 'pending',
+        attempts: 0,
+        max_attempts: 6,
+        next_attempt_at: now,
+        created_at: now,
+        updated_at: now,
+      });
+    }
+
+    if (deliveries.length > 0) {
+      const { error: outboxError } = await supabase.from('delivery_outbox').upsert(deliveries, {
+        onConflict: 'lead_id,destination',
+        ignoreDuplicates: true,
+      });
+
+      if (outboxError) {
+        // The lead is already safe. The drain's reconciliation pass recreates
+        // any missing delivery rows before it claims work.
+        log.error('outbox.enqueue_failed', outboxError, { lead_id: leadId, disposition });
+        await reportError(outboxError, {
+          tags: { area: 'delivery', route: 'lead' },
+          extra: { lead_id: leadId },
+          requestId: log.requestId,
+        });
+      } else {
+        events.add('outbox.enqueued', {
           lead_id: leadId,
           disposition,
           detail: {
-            destinations: disposition === 'qualified'
-              ? ['meta_capi', 'n8n_airtable']
-              : ['n8n_airtable'],
+            destinations: deliveries.map((d) => d.destination),
+            follow_up_type: decision.followUpType,
           },
-      });
+        });
+      }
     }
 
     events.add('lead.completed', {
