@@ -17,3 +17,9 @@ Claude outputs/
 
 # temp lock artifacts
 .tmp_locks/
+
+# internal working drafts kept out of the review tree
+docs/LOOM.md
+docs/assignment-readiness-review-2026-09-10.md
+docs/ux-growth-review-2026-09-10.md
+docs/verification-2026-09-09.md

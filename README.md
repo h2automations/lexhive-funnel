@@ -34,8 +34,7 @@ Manager, Airtable and n8n: the browser `Lead` event carried the same `event_id`
 the server persisted, restricted leads reached neither a contact field nor a
 Meta optimisation event, and both Airtable tables received what they should.
 Meta's Test Events reporting at the time showed 8.0/10 match quality on `Lead`
-with browser and server both delivering. `docs/verification-2026-09-09.md` is
-the full record; `PRODUCTION.md` §3 is what came of it.
+with browser and server both delivering. `PRODUCTION.md` §3 is what came of it.
 
 That run also found the outage this repository is now built around — the drain
 had never once executed. A note of caution about the paragraph above: it
@@ -50,11 +49,9 @@ degraded signal still alerts), activate the nurture branch of
 writes to, and capture the Meta Test Events deduplication screenshot.
 
 The current build is deployed and the full Playwright suite is green against
-it. A note of caution: the funnel's verified-in-production lineage still crosses
-a rewrite. `docs/verification-2026-09-09.md` documents the pre-rewrite
-end-to-end run; the rebuilt funnel (six questions, state asked second, knockout
-early-exit, phone-led contact, disqualified-opt-in nurture) is verified by the
-Playwright suite described in `tests/README.md`.
+it. The rebuilt funnel (six questions, state asked second, knockout early-exit,
+phone-led contact, disqualified-opt-in nurture) is verified by the Playwright
+suite described in `tests/README.md`.
 
 ---
 
