@@ -1,8 +1,11 @@
 # GTM container setup — `GTM-P34XGVL3`
 
-The container snippet is in `index.html`. Every browser tag is configured here
-rather than in code: the app pushes to the dataLayer, the container decides who
-hears about it, and adding a vendor is a container change rather than a deploy.
+The container loads from code — `loadGtm()` in `src/main.tsx` injects the GTM
+snippet for every route except `/ops`, which must never fire marketing or
+analytics tags. (An `index.html` snippet cannot see the SPA route, so the guard
+lives in code.) Every browser tag is configured in the container rather than in
+code: the app pushes to the dataLayer, the container decides who hears about
+it, and adding a vendor is a container change rather than a deploy.
 
 **Export the finished container** (Admin → Export Container) and commit the JSON
 to `gtm/` — same reason the n8n workflows are exported. Configuration that only
@@ -90,9 +93,21 @@ Use the community **Facebook Pixel** template (Templates → Search Gallery).
 
 | Field | Value |
 |---|---|
-| Pixel ID | `27653864700958179` |
+| Pixel ID | `3238075189714579` |
 | Object Property Name / advanced matching | `external_id` = `{{DLV - external_id}}` |
 | Trigger | **`CE - funnel_ready`** |
+
+> **Check the ID against Events Manager before you paste it.** There are two
+> datasets in this account named `lexhive-assignment`. `3238075189714579`
+> (business: SEER Business) is the live one — it holds every Lead, arriving
+> from both the Pixel and the Conversions API, which is what Events Manager
+> labels *Integration: Multiple*. `27653864700958179` sits under a different ad
+> account, has never received a Lead, and is the one this document used to
+> name. Pointing the container at it would send browser conversions somewhere
+> the server never looks, with no error anywhere — the events keep sending, the
+> tags keep going green, and deduplication just stops. `/api/health` reports
+> `meta_pixel_id` and `tests/tags.spec.ts` asserts the browser matches it, so
+> the mistake is now catchable, but it is far cheaper not to make.
 
 > Trigger this on `funnel_ready`, **not All Pages.** GTM loads before React
 > mounts, so an All Pages trigger fires before `external_id` exists and
